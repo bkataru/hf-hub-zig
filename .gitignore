@@ -1,0 +1,245 @@
+# ============================================================================
+# Zig Build Artifacts
+# ============================================================================
+.zig-cache/
+zig-cache/
+zig-out/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.pdb
+
+# ============================================================================
+# Machine Learning Model Files (CRITICAL - These can be very large!)
+# ============================================================================
+# GGUF format (primary format for this project)
+*.gguf
+*.gguf.part
+*.gguf.partial
+
+# Safetensors
+*.safetensors
+
+# PyTorch formats
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.pickle
+*.pkl
+
+# TensorFlow formats
+*.pb
+*.h5
+*.hdf5
+*.tflite
+
+# ONNX format
+*.onnx
+
+# Other ML formats
+*.msgpack
+*.mlmodel
+*.mar
+*.model
+
+# ============================================================================
+# HuggingFace Hub Cache Structure
+# ============================================================================
+# Standard HF cache directory structure
+# models--{org}--{name}/snapshots/{revision}/...
+models--*/
+datasets--*/
+spaces--*/
+
+# HF Hub blobs and refs
+blobs/
+refs/
+snapshots/
+
+# Partial/incomplete downloads
+*.partial
+*.downloading
+*.incomplete
+*.tmp.download
+
+# Lock files from concurrent downloads
+*.lock
+.locks/
+
+# ============================================================================
+# Environment and Secrets (NEVER commit these!)
+# ============================================================================
+.env
+.env.*
+.env.local
+.env.*.local
+*.env
+
+# HuggingFace token files
+.huggingface/
+huggingface_token
+hf_token
+.hf_token
+token.txt
+credentials.json
+
+# ============================================================================
+# IDE and Editor Files
+# ============================================================================
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Vim/Neovim
+*.swp
+*.swo
+*.swn
+*~
+.*.swp
+.*.swo
+Session.vim
+Sessionx.vim
+.netrwhist
+tags
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ============================================================================
+# Operating System Files
+# ============================================================================
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================================
+# Logs and Temporary Files
+# ============================================================================
+*.log
+*.log.*
+logs/
+*.tmp
+*.temp
+tmp/
+temp/
+*.bak
+*.backup
+*.orig
+
+# ============================================================================
+# Test Artifacts
+# ============================================================================
+# Downloaded test fixtures (actual model files)
+tests/downloads/
+tests/cache/
+tests/tmp/
+test_cache/
+test_output/
+
+# Coverage reports
+coverage/
+*.gcov
+*.gcda
+*.gcno
+lcov.info
+htmlcov/
+
+# ============================================================================
+# Documentation Build Artifacts
+# ============================================================================
+docs/_build/
+docs/html/
+docs/xml/
+site/
+
+# ============================================================================
+# Package/Release Artifacts
+# ============================================================================
+dist/
+release/
+*.tar.gz
+*.zip
+*.tar.xz
+*.tar.bz2
+*.deb
+*.rpm
+*.msi
+*.pkg
+
+# ============================================================================
+# Benchmark and Profiling Data
+# ============================================================================
+*.perf
+perf.data
+perf.data.old
+*.trace
+flamegraph.svg
+profile/
+benchmarks/results/
+
+# ============================================================================
+# Miscellaneous
+# ============================================================================
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Debug files
+*.dSYM/
+
+# Local configuration overrides
+local.zig
+config.local.zig
+*.local
+
+# Scratch/notes files
+scratch/
+notes/
+TODO.local
+NOTES.md
+.scratch
