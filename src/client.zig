@@ -7,6 +7,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const http = std.http;
 const Uri = std.Uri;
+const builtin = @import("builtin");
 
 const Config = @import("config.zig").Config;
 const errors = @import("errors.zig");
@@ -276,7 +277,6 @@ pub const HttpClient = struct {
 
     /// Download a file using streaming - reads directly to a file
     /// This is the safe way to do streaming downloads - keeps everything in one scope
-    /// Note: Uses streamRemaining with FileStreamWriter due to Zig 0.15.2 readSliceShort bug
     pub fn downloadToFile(
         self: *Self,
         url: []const u8,
@@ -358,24 +358,32 @@ pub const HttpClient = struct {
         }
 
         // Get content-length from response headers
-        const content_length: ?u64 = response.head.content_length;
+        var content_length: ?u64 = null;
+        var header_iter = response.head.iterateHeaders();
+        while (header_iter.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+                content_length = std.fmt.parseInt(u64, header.value, 10) catch null;
+                break;
+            }
+        }
 
-        // Use streamRemaining with our file writer wrapper (works around Zig 0.15.2 readSliceShort bug)
+        // Read body and write to file - all in one scope
         var transfer_buffer: [8192]u8 = undefined;
         const body_reader = response.reader(&transfer_buffer);
+        var bytes_downloaded: u64 = 0;
 
-        // Create a buffered file writer
-        var file_write_buf: [8192]u8 = undefined;
-        var file_writer = file.writer(&file_write_buf);
+        var read_buf: [8192]u8 = undefined;
+        while (true) {
+            const bytes_read = body_reader.readSliceShort(&read_buf) catch {
+                return HubError.NetworkError;
+            };
+            if (bytes_read == 0) break;
 
-        const bytes_downloaded = body_reader.streamRemaining(&file_writer.interface) catch {
-            return HubError.NetworkError;
-        };
-
-        // Flush remaining data
-        file_writer.interface.flush() catch {
-            return HubError.IoError;
-        };
+            file.writeAll(read_buf[0..bytes_read]) catch {
+                return HubError.IoError;
+            };
+            bytes_downloaded += bytes_read;
+        }
 
         return StreamingResult{
             .status_code = status_code,
@@ -385,7 +393,6 @@ pub const HttpClient = struct {
     }
 
     /// Download a file using streaming with a callback for progress
-    /// Uses stream() in chunks to report progress periodically (workaround for Zig 0.15.2 readSliceShort bug)
     pub fn downloadToFileWithProgress(
         self: *Self,
         url: []const u8,
@@ -459,6 +466,25 @@ pub const HttpClient = struct {
             return mapConnectionError(err);
         };
 
+        // Debug: Check the reader state after receiveHead
+        if (builtin.mode == .Debug) {
+            const reader_state = req.reader.state;
+            switch (reader_state) {
+                .ready => std.debug.print("DEBUG: reader state is .ready (WRONG!)\n", .{}),
+                .received_head => std.debug.print("DEBUG: reader state is .received_head (correct)\n", .{}),
+                .body_none => std.debug.print("DEBUG: reader state is .body_none\n", .{}),
+                .body_remaining_content_length => |len| std.debug.print("DEBUG: reader state is .body_remaining_content_length: {}\n", .{len}),
+                .body_remaining_chunk_len => std.debug.print("DEBUG: reader state is .body_remaining_chunk_len\n", .{}),
+                .closing => std.debug.print("DEBUG: reader state is .closing\n", .{}),
+            }
+            std.debug.print("DEBUG: response.head.transfer_encoding = {}\n", .{response.head.transfer_encoding});
+            std.debug.print("DEBUG: response.head.content_length = {?}\n", .{response.head.content_length});
+            std.debug.print("DEBUG: &req = {*}\n", .{&req});
+            std.debug.print("DEBUG: response.request = {*}\n", .{response.request});
+            std.debug.print("DEBUG: &req.reader = {*}\n", .{&req.reader});
+            std.debug.print("DEBUG: &response.request.reader = {*}\n", .{&response.request.reader});
+        }
+
         // Check status
         const status_code = @intFromEnum(response.head.status);
         if (status_code >= 400) {
@@ -469,54 +495,73 @@ pub const HttpClient = struct {
         }
 
         // Get content-length from response headers
-        const content_length: ?u64 = response.head.content_length;
-
-        // Set up body reader
-        var transfer_buffer: [8192]u8 = undefined;
-        const body_reader = response.reader(&transfer_buffer);
-
-        // Create buffered file writer
-        var file_write_buf: [8192]u8 = undefined;
-        var file_writer = file.writer(&file_write_buf);
-
-        // Download in chunks with progress reporting
-        // Report progress every 64KB to avoid overwhelming the callback
-        const chunk_threshold: u64 = 65536;
-        var total_downloaded: u64 = 0;
-        var last_report: u64 = 0;
-
-        // Use stream() with limited chunks
-        while (true) {
-            const chunk_size = chunk_threshold - (total_downloaded - last_report);
-            const limit = std.Io.Limit.limited(chunk_size);
-
-            const bytes_streamed = body_reader.stream(&file_writer.interface, limit) catch |err| switch (err) {
-                error.EndOfStream => break,
-                else => return HubError.NetworkError,
-            };
-
-            if (bytes_streamed == 0) break;
-            total_downloaded += bytes_streamed;
-
-            // Report progress if we've crossed the threshold
-            if (total_downloaded - last_report >= chunk_threshold) {
-                progress_fn(progress_ctx, (start_byte orelse 0) + total_downloaded, content_length);
-                last_report = total_downloaded;
+        var content_length: ?u64 = null;
+        var header_iter = response.head.iterateHeaders();
+        while (header_iter.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+                content_length = std.fmt.parseInt(u64, header.value, 10) catch null;
+                break;
             }
         }
 
-        // Flush remaining data
-        file_writer.interface.flush() catch {
-            return HubError.IoError;
-        };
+        // Calculate total size including resumed bytes
+        const total_size: ?u64 = if (content_length) |cl|
+            if (start_byte) |sb| cl + sb else cl
+        else
+            null;
 
-        // Final progress callback to ensure 100% is reported
-        progress_fn(progress_ctx, (start_byte orelse 0) + total_downloaded, content_length);
+        // Read body and write to file - all in one scope
+        var transfer_buffer: [8192]u8 = undefined;
+
+        // Debug: Check state before calling response.reader()
+        if (builtin.mode == .Debug) {
+            std.debug.print("DEBUG: Before response.reader() - req.reader.state = ", .{});
+            switch (req.reader.state) {
+                .ready => std.debug.print(".ready\n", .{}),
+                .received_head => std.debug.print(".received_head\n", .{}),
+                .body_remaining_content_length => |len| std.debug.print(".body_remaining_content_length({})\n", .{len}),
+                else => std.debug.print("other\n", .{}),
+            }
+        }
+
+        const body_reader = response.reader(&transfer_buffer);
+
+        // Debug: Check state after calling response.reader()
+        if (builtin.mode == .Debug) {
+            std.debug.print("DEBUG: After response.reader() - req.reader.state = ", .{});
+            switch (req.reader.state) {
+                .ready => std.debug.print(".ready\n", .{}),
+                .received_head => std.debug.print(".received_head\n", .{}),
+                .body_remaining_content_length => |len| std.debug.print(".body_remaining_content_length({})\n", .{len}),
+                else => std.debug.print("other\n", .{}),
+            }
+            std.debug.print("DEBUG: body_reader ptr = {*}\n", .{body_reader});
+            std.debug.print("DEBUG: &req.reader.interface = {*}\n", .{&req.reader.interface});
+        }
+
+        var bytes_downloaded: u64 = 0;
+        const initial_bytes: u64 = start_byte orelse 0;
+
+        var read_buf: [8192]u8 = undefined;
+        while (true) {
+            const bytes_read = body_reader.readSliceShort(&read_buf) catch {
+                return HubError.NetworkError;
+            };
+            if (bytes_read == 0) break;
+
+            file.writeAll(read_buf[0..bytes_read]) catch {
+                return HubError.IoError;
+            };
+            bytes_downloaded += bytes_read;
+
+            // Call progress callback
+            progress_fn(progress_ctx, initial_bytes + bytes_downloaded, total_size);
+        }
 
         return StreamingResult{
             .status_code = status_code,
             .content_length = content_length,
-            .bytes_downloaded = total_downloaded,
+            .bytes_downloaded = bytes_downloaded,
         };
     }
 
