@@ -32,7 +32,10 @@ pub const UserApi = struct {
     /// Get current authenticated user information (whoami)
     /// Requires a valid HF_TOKEN to be set
     pub fn whoami(self: *Self) !types.User {
-        var response = try self.client.get("/api/whoami", null);
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/api/whoami", .{self.client.endpoint});
+        defer self.allocator.free(url);
+
+        var response = try self.client.get(url);
         defer response.deinit();
 
         // Check for errors
@@ -61,7 +64,12 @@ pub const UserApi = struct {
     /// Check if the current token is valid
     /// Returns true if authenticated, false otherwise
     pub fn isAuthenticated(self: *Self) bool {
-        var response = self.client.get("/api/whoami", null) catch {
+        const url = std.fmt.allocPrint(self.allocator, "{s}/api/whoami", .{self.client.endpoint}) catch {
+            return false;
+        };
+        defer self.allocator.free(url);
+
+        var response = self.client.get(url) catch {
             return false;
         };
         defer response.deinit();
@@ -87,10 +95,10 @@ pub const UserApi = struct {
     /// This is useful for checking access to gated/private models
     pub fn hasModelAccess(self: *Self, model_id: []const u8) !bool {
         // Try to get model info - if it succeeds, we have access
-        const path = try std.fmt.allocPrint(self.allocator, "/api/models/{s}", .{model_id});
-        defer self.allocator.free(path);
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/api/models/{s}", .{ self.client.endpoint, model_id });
+        defer self.allocator.free(url);
 
-        var response = self.client.get(path, null) catch |err| {
+        var response = self.client.get(url) catch |err| {
             if (err == HubError.NetworkError or err == HubError.Timeout) {
                 return err;
             }
@@ -103,7 +111,10 @@ pub const UserApi = struct {
 
     /// Get access token info (if available from the API)
     pub fn getTokenInfo(self: *Self) !TokenInfo {
-        var response = try self.client.get("/api/whoami", null);
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/api/whoami", .{self.client.endpoint});
+        defer self.allocator.free(url);
+
+        var response = try self.client.get(url);
         defer response.deinit();
 
         if (!response.isSuccess()) {

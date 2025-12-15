@@ -1,4 +1,4 @@
-//! HTTP Client wrapper for HuggingFace Hub API
+//! HTTP Client for HuggingFace Hub API
 //!
 //! This module provides a high-level HTTP client built on top of Zig's std.http.Client
 //! with support for authentication, timeouts, redirects, and streaming responses.
@@ -130,7 +130,7 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Initialize with default configuration
+    /// Initialize with just an allocator and default config
     pub fn initDefault(allocator: Allocator) !Self {
         const client = http.Client{ .allocator = allocator };
 
@@ -150,40 +150,27 @@ pub const HttpClient = struct {
     }
 
     /// Perform a GET request
-    pub fn get(self: *Self, path: []const u8, query: ?[]const u8) !Response {
-        const url = try self.buildUrl(path, query);
-        defer self.allocator.free(url);
-
+    pub fn get(self: *Self, url: []const u8) !Response {
         return self.request(.GET, url, null);
     }
 
     /// Perform a POST request
-    pub fn post(self: *Self, path: []const u8, body: ?[]const u8) !Response {
-        const url = try self.buildUrl(path, null);
-        defer self.allocator.free(url);
-
+    pub fn post(self: *Self, url: []const u8, body: ?[]const u8) !Response {
         return self.request(.POST, url, body);
     }
 
     /// Perform a HEAD request
-    pub fn head(self: *Self, path: []const u8) !Response {
-        const url = try self.buildUrl(path, null);
-        defer self.allocator.free(url);
-
+    pub fn head(self: *Self, url: []const u8) !Response {
         return self.request(.HEAD, url, null);
     }
 
-    /// Build full URL from path and optional query
-    fn buildUrl(self: *Self, path: []const u8, query: ?[]const u8) ![]u8 {
-        if (query) |q| {
-            if (std.mem.indexOf(u8, path, "?") != null) {
-                return std.fmt.allocPrint(self.allocator, "{s}{s}&{s}", .{ self.endpoint, path, q });
-            } else {
-                return std.fmt.allocPrint(self.allocator, "{s}{s}?{s}", .{ self.endpoint, path, q });
-            }
-        } else {
-            return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.endpoint, path });
+    /// Build full URL from endpoint and path
+    fn buildUrl(self: *Self, path: []const u8) ![]u8 {
+        // If path already starts with http, return as-is
+        if (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://")) {
+            return self.allocator.dupe(u8, path);
         }
+        return std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.endpoint, path });
     }
 
     /// Perform an HTTP request
@@ -246,7 +233,7 @@ pub const HttpClient = struct {
 
         // Receive response head
         var redirect_buffer: [4096]u8 = undefined;
-        var response = req.receiveHead(&redirect_buffer) catch |err| {
+        const response = req.receiveHead(&redirect_buffer) catch |err| {
             return mapConnectionError(err);
         };
 
@@ -268,8 +255,9 @@ pub const HttpClient = struct {
         var response_body: []u8 = &[_]u8{};
 
         if (method != .HEAD) {
-            var transfer_buffer: [8192]u8 = undefined;
-            const body_reader = response.reader(&transfer_buffer);
+            var transfer_buffer: [8192]u8 align(8) = undefined;
+            var mutable_response = response;
+            const body_reader = mutable_response.reader(&transfer_buffer);
             response_body = body_reader.allocRemaining(self.allocator, std.io.Limit.limited(MAX_RESPONSE_SIZE)) catch |err| {
                 switch (err) {
                     error.StreamTooLong => return HubError.ResponseTooLarge,
@@ -286,13 +274,15 @@ pub const HttpClient = struct {
         };
     }
 
-    /// Perform a GET request and return raw URL for streaming
-    /// Returns a request object that the caller can read from
-    pub fn getStreaming(
+    /// Download a file using streaming - reads directly to a file
+    /// This is the safe way to do streaming downloads - keeps everything in one scope
+    /// Note: Uses streamRemaining with FileStreamWriter due to Zig 0.15.2 readSliceShort bug
+    pub fn downloadToFile(
         self: *Self,
         url: []const u8,
+        file: std.fs.File,
         start_byte: ?u64,
-    ) !StreamingRequest {
+    ) !StreamingResult {
         const uri = Uri.parse(url) catch return HubError.InvalidUrl;
 
         // Build headers
@@ -345,24 +335,22 @@ pub const HttpClient = struct {
         }) catch |err| {
             return mapConnectionError(err);
         };
+        defer req.deinit();
 
         // Send request without body
         req.sendBodiless() catch |err| {
-            req.deinit();
             return mapConnectionError(err);
         };
 
         // Receive response head
         var redirect_buffer: [4096]u8 = undefined;
-        const response = req.receiveHead(&redirect_buffer) catch |err| {
-            req.deinit();
+        var response = req.receiveHead(&redirect_buffer) catch |err| {
             return mapConnectionError(err);
         };
 
         // Check status
         const status_code = @intFromEnum(response.head.status);
         if (status_code >= 400) {
-            req.deinit();
             if (errors.errorFromStatus(status_code)) |err| {
                 return err;
             }
@@ -370,20 +358,165 @@ pub const HttpClient = struct {
         }
 
         // Get content-length from response headers
-        var content_length: ?u64 = null;
-        var header_iter = response.head.iterateHeaders();
-        while (header_iter.next()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
-                content_length = std.fmt.parseInt(u64, header.value, 10) catch null;
-                break;
+        const content_length: ?u64 = response.head.content_length;
+
+        // Use streamRemaining with our file writer wrapper (works around Zig 0.15.2 readSliceShort bug)
+        var transfer_buffer: [8192]u8 = undefined;
+        const body_reader = response.reader(&transfer_buffer);
+
+        // Create a buffered file writer
+        var file_write_buf: [8192]u8 = undefined;
+        var file_writer = file.writer(&file_write_buf);
+
+        const bytes_downloaded = body_reader.streamRemaining(&file_writer.interface) catch {
+            return HubError.NetworkError;
+        };
+
+        // Flush remaining data
+        file_writer.interface.flush() catch {
+            return HubError.IoError;
+        };
+
+        return StreamingResult{
+            .status_code = status_code,
+            .content_length = content_length,
+            .bytes_downloaded = bytes_downloaded,
+        };
+    }
+
+    /// Download a file using streaming with a callback for progress
+    /// Uses stream() in chunks to report progress periodically (workaround for Zig 0.15.2 readSliceShort bug)
+    pub fn downloadToFileWithProgress(
+        self: *Self,
+        url: []const u8,
+        file: std.fs.File,
+        start_byte: ?u64,
+        progress_ctx: anytype,
+        progress_fn: *const fn (ctx: @TypeOf(progress_ctx), bytes_so_far: u64, total: ?u64) void,
+    ) !StreamingResult {
+        const uri = Uri.parse(url) catch return HubError.InvalidUrl;
+
+        // Build headers
+        const headers = http.Client.Request.Headers{
+            .user_agent = .{ .override = self.user_agent },
+            .accept_encoding = .{ .override = "identity" },
+        };
+
+        // Prepare extra headers
+        var extra_headers_buf: [3]http.Header = undefined;
+        var extra_headers_len: usize = 0;
+
+        // Store auth value in a persistent buffer
+        var auth_storage: [512]u8 = undefined;
+        if (self.token) |token| {
+            const auth_value = std.fmt.bufPrint(&auth_storage, "Bearer {s}", .{token}) catch {
+                return HubError.OutOfMemory;
+            };
+            extra_headers_buf[extra_headers_len] = .{
+                .name = "Authorization",
+                .value = auth_value,
+            };
+            extra_headers_len += 1;
+        }
+
+        extra_headers_buf[extra_headers_len] = .{
+            .name = "Accept",
+            .value = "*/*",
+        };
+        extra_headers_len += 1;
+
+        // Range header for resume support
+        var range_buf: [64]u8 = undefined;
+        if (start_byte) |sb| {
+            const range_value = std.fmt.bufPrint(&range_buf, "bytes={d}-", .{sb}) catch {
+                return HubError.OutOfMemory;
+            };
+            extra_headers_buf[extra_headers_len] = .{
+                .name = "Range",
+                .value = range_value,
+            };
+            extra_headers_len += 1;
+        }
+
+        // Create request
+        var req = self.http_client.request(.GET, uri, .{
+            .headers = headers,
+            .extra_headers = extra_headers_buf[0..extra_headers_len],
+            .redirect_behavior = .init(@as(u16, @intCast(self.max_redirects))),
+        }) catch |err| {
+            return mapConnectionError(err);
+        };
+        defer req.deinit();
+
+        // Send request without body
+        req.sendBodiless() catch |err| {
+            return mapConnectionError(err);
+        };
+
+        // Receive response head
+        var redirect_buffer: [4096]u8 = undefined;
+        var response = req.receiveHead(&redirect_buffer) catch |err| {
+            return mapConnectionError(err);
+        };
+
+        // Check status
+        const status_code = @intFromEnum(response.head.status);
+        if (status_code >= 400) {
+            if (errors.errorFromStatus(status_code)) |err| {
+                return err;
+            }
+            return HubError.InvalidResponse;
+        }
+
+        // Get content-length from response headers
+        const content_length: ?u64 = response.head.content_length;
+
+        // Set up body reader
+        var transfer_buffer: [8192]u8 = undefined;
+        const body_reader = response.reader(&transfer_buffer);
+
+        // Create buffered file writer
+        var file_write_buf: [8192]u8 = undefined;
+        var file_writer = file.writer(&file_write_buf);
+
+        // Download in chunks with progress reporting
+        // Report progress every 64KB to avoid overwhelming the callback
+        const chunk_threshold: u64 = 65536;
+        var total_downloaded: u64 = 0;
+        var last_report: u64 = 0;
+
+        // Use stream() with limited chunks
+        while (true) {
+            const chunk_size = chunk_threshold - (total_downloaded - last_report);
+            const limit = std.Io.Limit.limited(chunk_size);
+
+            const bytes_streamed = body_reader.stream(&file_writer.interface, limit) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return HubError.NetworkError,
+            };
+
+            if (bytes_streamed == 0) break;
+            total_downloaded += bytes_streamed;
+
+            // Report progress if we've crossed the threshold
+            if (total_downloaded - last_report >= chunk_threshold) {
+                progress_fn(progress_ctx, (start_byte orelse 0) + total_downloaded, content_length);
+                last_report = total_downloaded;
             }
         }
 
-        return StreamingRequest{
-            .request = req,
-            .response = response,
+        // Flush remaining data
+        file_writer.interface.flush() catch {
+            return HubError.IoError;
+        };
+
+        // Final progress callback to ensure 100% is reported
+        progress_fn(progress_ctx, (start_byte orelse 0) + total_downloaded, content_length);
+
+        return StreamingResult{
             .status_code = status_code,
             .content_length = content_length,
+            .bytes_downloaded = total_downloaded,
         };
     }
 
@@ -406,68 +539,45 @@ pub const HttpClient = struct {
     }
 };
 
-/// Streaming request wrapper
-pub const StreamingRequest = struct {
-    request: http.Client.Request,
-    response: http.Client.Response,
+/// Result of a streaming download
+pub const StreamingResult = struct {
     status_code: u16,
     content_length: ?u64,
-    transfer_buffer: [8192]u8 = undefined,
-
-    const Self = @This();
-
-    /// Get the response reader
-    pub fn reader(self: *Self) *std.io.Reader {
-        return self.response.reader(&self.transfer_buffer);
-    }
-
-    /// Get Content-Length from response
-    pub fn getContentLength(self: *Self) ?u64 {
-        return self.content_length;
-    }
-
-    /// Clean up
-    pub fn deinit(self: *Self) void {
-        self.request.deinit();
-    }
+    bytes_downloaded: u64,
 };
 
-/// Map low-level errors to HubError
+/// Map connection errors to HubError
 fn mapConnectionError(err: anyerror) HubError {
     return switch (err) {
         error.ConnectionRefused => HubError.NetworkError,
         error.ConnectionResetByPeer => HubError.NetworkError,
         error.ConnectionTimedOut => HubError.Timeout,
         error.NetworkUnreachable => HubError.NetworkError,
-        error.HostUnreachable => HubError.NetworkError,
-        error.UnknownHostName => HubError.NetworkError,
+        error.HostLacksNetworkAddresses => HubError.NetworkError,
         error.TemporaryNameServerFailure => HubError.NetworkError,
-        error.ServerNameNotKnown => HubError.NetworkError,
-        error.TlsInitializationFailed => HubError.TlsError,
-        error.CertificateIssue => HubError.TlsError,
-        error.EndOfStream => HubError.NetworkError,
-        error.Timeout => HubError.Timeout,
+        error.NameServerFailure => HubError.NetworkError,
+        error.UnknownHostName => HubError.InvalidUrl,
+        error.TlsAlertUnknownCa => HubError.TlsError,
+        error.TlsAlertDecodeError => HubError.TlsError,
+        error.OutOfMemory => HubError.OutOfMemory,
         else => HubError.NetworkError,
     };
 }
 
-/// URL encode a string
+/// URL-encode a string
 pub fn urlEncode(allocator: Allocator, input: []const u8) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
-    errdefer result.deinit();
+    var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(allocator);
 
     for (input) |c| {
         if (isUnreserved(c)) {
-            try result.append(c);
+            try result.append(allocator, c);
         } else {
-            try result.append('%');
-            const hex = "0123456789ABCDEF";
-            try result.append(hex[c >> 4]);
-            try result.append(hex[c & 0x0F]);
+            try result.writer(allocator).print("%{X:0>2}", .{c});
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 fn isUnreserved(c: u8) bool {
@@ -477,28 +587,27 @@ fn isUnreserved(c: u8) bool {
         c == '-' or c == '_' or c == '.' or c == '~';
 }
 
-/// Build query string from key-value pairs
+/// Build a query string from key-value pairs
 pub fn buildQueryString(allocator: Allocator, params: []const QueryParam) ![]u8 {
-    if (params.len == 0) return try allocator.dupe(u8, "");
+    if (params.len == 0) return allocator.dupe(u8, "");
 
-    var result = std.array_list.Managed(u8).init(allocator);
-    errdefer result.deinit();
+    var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(allocator);
 
     for (params, 0..) |param, i| {
-        if (i > 0) try result.append('&');
+        if (i > 0) try result.append(allocator, '&');
 
         const encoded_key = try urlEncode(allocator, param.key);
         defer allocator.free(encoded_key);
-        try result.appendSlice(encoded_key);
-
-        try result.append('=');
-
         const encoded_value = try urlEncode(allocator, param.value);
         defer allocator.free(encoded_value);
-        try result.appendSlice(encoded_value);
+
+        try result.appendSlice(allocator, encoded_key);
+        try result.append(allocator, '=');
+        try result.appendSlice(allocator, encoded_value);
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 pub const QueryParam = struct {
@@ -513,30 +622,34 @@ pub const QueryParam = struct {
 test "urlEncode basic" {
     const allocator = std.testing.allocator;
 
+    // Test simple string
     const simple = try urlEncode(allocator, "hello");
     defer allocator.free(simple);
     try std.testing.expectEqualStrings("hello", simple);
 
-    const with_space = try urlEncode(allocator, "hello world");
-    defer allocator.free(with_space);
-    try std.testing.expectEqualStrings("hello%20world", with_space);
+    // Test string with spaces
+    const with_spaces = try urlEncode(allocator, "hello world");
+    defer allocator.free(with_spaces);
+    try std.testing.expectEqualStrings("hello%20world", with_spaces);
 
-    const special = try urlEncode(allocator, "key=value&other");
+    // Test special characters
+    const special = try urlEncode(allocator, "a=b&c=d");
     defer allocator.free(special);
-    try std.testing.expectEqualStrings("key%3Dvalue%26other", special);
+    try std.testing.expectEqualStrings("a%3Db%26c%3Dd", special);
 }
 
 test "buildQueryString" {
     const allocator = std.testing.allocator;
 
     const params = [_]QueryParam{
-        .{ .key = "search", .value = "llama 2" },
+        .{ .key = "search", .value = "hello world" },
         .{ .key = "limit", .value = "10" },
     };
 
-    const query = try buildQueryString(allocator, &params);
-    defer allocator.free(query);
-    try std.testing.expectEqualStrings("search=llama%202&limit=10", query);
+    const qs = try buildQueryString(allocator, &params);
+    defer allocator.free(qs);
+
+    try std.testing.expectEqualStrings("search=hello%20world&limit=10", qs);
 }
 
 test "HeaderMap operations" {
@@ -545,30 +658,33 @@ test "HeaderMap operations" {
     var headers = HeaderMap.init(allocator);
     defer headers.deinit();
 
-    try headers.put("Content-Type", "application/json");
-    try headers.put("Authorization", "Bearer token123");
+    try headers.put("content-type", "application/json");
+    try headers.put("authorization", "Bearer token123");
 
-    try std.testing.expectEqualStrings("application/json", headers.get("Content-Type").?);
-    try std.testing.expectEqualStrings("Bearer token123", headers.get("Authorization").?);
-    try std.testing.expect(headers.get("X-Unknown") == null);
+    try std.testing.expectEqualStrings("application/json", headers.get("content-type").?);
+    try std.testing.expectEqualStrings("Bearer token123", headers.get("authorization").?);
+    try std.testing.expect(headers.get("nonexistent") == null);
 }
 
 test "Response.isSuccess" {
-    var headers = HeaderMap.init(std.testing.allocator);
-    defer headers.deinit();
+    const allocator = std.testing.allocator;
 
-    var response = Response{
+    const headers = HeaderMap.init(allocator);
+
+    var response_200 = Response{
         .status_code = 200,
         .headers = headers,
         .body = &[_]u8{},
-        .allocator = std.testing.allocator,
+        .allocator = allocator,
     };
+    try std.testing.expect(response_200.isSuccess());
 
-    try std.testing.expect(response.isSuccess());
+    response_200.status_code = 201;
+    try std.testing.expect(response_200.isSuccess());
 
-    response.status_code = 404;
-    try std.testing.expect(!response.isSuccess());
+    response_200.status_code = 404;
+    try std.testing.expect(!response_200.isSuccess());
 
-    response.status_code = 299;
-    try std.testing.expect(response.isSuccess());
+    response_200.status_code = 500;
+    try std.testing.expect(!response_200.isSuccess());
 }

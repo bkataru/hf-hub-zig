@@ -15,7 +15,7 @@ const errors = @import("../errors.zig");
 const HubError = errors.HubError;
 const ErrorContext = errors.ErrorContext;
 const json = @import("../json.zig");
-const RawModel = json.RawModel;
+const ParsedModel = json.ParsedModel;
 const types = @import("../types.zig");
 const Model = types.Model;
 const ModelInfo = types.ModelInfo;
@@ -41,11 +41,11 @@ pub const ModelsApi = struct {
 
     /// Search for models on HuggingFace Hub
     pub fn search(self: *Self, query: SearchQuery) !SearchResult {
-        // Build query string directly to avoid buffer lifetime issues
-        var query_parts = std.array_list.Managed(u8).init(self.allocator);
-        defer query_parts.deinit();
+        // Build query string
+        var query_parts = std.ArrayListUnmanaged(u8){};
+        defer query_parts.deinit(self.allocator);
 
-        const writer = query_parts.writer();
+        const writer = query_parts.writer(self.allocator);
 
         // Search text
         if (query.search.len > 0) {
@@ -96,12 +96,16 @@ pub const ModelsApi = struct {
             try writer.writeAll("config=true");
         }
 
-        // Get query string
-        const query_string = try query_parts.toOwnedSlice();
-        defer self.allocator.free(query_string);
+        // Build full URL
+        const query_string = query_parts.items;
+        const url = if (query_string.len > 0)
+            try std.fmt.allocPrint(self.allocator, "{s}/api/models?{s}", .{ self.client.endpoint, query_string })
+        else
+            try std.fmt.allocPrint(self.allocator, "{s}/api/models", .{self.client.endpoint});
+        defer self.allocator.free(url);
 
         // Make request
-        var response = try self.client.get("/api/models", query_string);
+        var response = try self.client.get(url);
         defer response.deinit();
 
         // Check status
@@ -109,33 +113,30 @@ pub const ModelsApi = struct {
             return errors.errorFromStatus(response.status_code) orelse HubError.InvalidResponse;
         }
 
-        // Parse response - it's an array of models
-        var parsed = std.json.parseFromSlice(
-            []RawModel,
-            self.allocator,
-            response.body,
-            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-        ) catch {
+        // Parse response using flexible JSON parsing
+        const parsed_models = json.parseModels(self.allocator, response.body) catch {
             return HubError.InvalidJson;
         };
-        defer parsed.deinit();
+        defer self.allocator.free(parsed_models);
 
         // Convert to domain types
-        var models = std.array_list.Managed(Model).init(self.allocator);
+        var models = std.ArrayListUnmanaged(Model){};
         errdefer {
             for (models.items) |*m| {
                 m.deinit(self.allocator);
             }
-            models.deinit();
+            models.deinit(self.allocator);
         }
 
-        for (parsed.value) |raw_model| {
-            const model = try json.toModel(self.allocator, raw_model);
-            try models.append(model);
+        for (parsed_models) |*parsed_model| {
+            const model = try json.toModel(self.allocator, parsed_model.*);
+            // Free the parsed model fields now that we've copied to domain type
+            json.freeModelFields(self.allocator, parsed_model);
+            try models.append(self.allocator, model);
         }
 
         return SearchResult{
-            .models = try models.toOwnedSlice(),
+            .models = try models.toOwnedSlice(self.allocator),
             .total = null, // API doesn't return total count
             .limit = query.limit,
             .offset = query.offset,
@@ -155,12 +156,12 @@ pub const ModelsApi = struct {
 
     /// Get detailed information about a specific model
     pub fn getModel(self: *Self, model_id: []const u8) !Model {
-        // Build path
-        const path = try std.fmt.allocPrint(self.allocator, "/api/models/{s}", .{model_id});
-        defer self.allocator.free(path);
+        // Build full URL
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/api/models/{s}", .{ self.client.endpoint, model_id });
+        defer self.allocator.free(url);
 
         // Make request
-        var response = try self.client.get(path, null);
+        var response = try self.client.get(url);
         defer response.deinit();
 
         // Check status
@@ -168,19 +169,18 @@ pub const ModelsApi = struct {
             return errors.errorFromStatus(response.status_code) orelse HubError.InvalidResponse;
         }
 
-        // Parse response
-        var parsed = std.json.parseFromSlice(
-            RawModel,
-            self.allocator,
-            response.body,
-            .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-        ) catch {
+        // Parse response using flexible JSON parsing
+        var parsed_model = json.parseModel(self.allocator, response.body) catch {
             return HubError.InvalidJson;
         };
-        defer parsed.deinit();
 
         // Convert to domain type
-        return json.toModel(self.allocator, parsed.value);
+        const model = try json.toModel(self.allocator, parsed_model);
+
+        // Free the parsed model fields now that we've copied to domain type
+        json.freeModelFields(self.allocator, &parsed_model);
+
+        return model;
     }
 
     /// Get extended model info (includes repo type, readme, etc.)
@@ -202,8 +202,8 @@ pub const ModelsApi = struct {
             m.deinit(self.allocator);
         }
 
-        var files = std.array_list.Managed(FileInfo).init(self.allocator);
-        errdefer files.deinit();
+        var files = std.ArrayListUnmanaged(FileInfo){};
+        errdefer files.deinit(self.allocator);
 
         for (model.siblings) |sibling| {
             const file_info = FileInfo{
@@ -213,10 +213,10 @@ pub const ModelsApi = struct {
                 .blob_id = if (sibling.blob_id) |bid| try self.allocator.dupe(u8, bid) else null,
                 .is_gguf = FileInfo.checkIsGguf(sibling.rfilename),
             };
-            try files.append(file_info);
+            try files.append(self.allocator, file_info);
         }
 
-        return files.toOwnedSlice();
+        return files.toOwnedSlice(self.allocator);
     }
 
     /// List only GGUF files in a model repository
@@ -230,8 +230,8 @@ pub const ModelsApi = struct {
             self.allocator.free(all_files);
         }
 
-        var gguf_files = std.array_list.Managed(FileInfo).init(self.allocator);
-        errdefer gguf_files.deinit();
+        var gguf_files = std.ArrayListUnmanaged(FileInfo){};
+        errdefer gguf_files.deinit(self.allocator);
 
         for (all_files) |file| {
             if (file.is_gguf) {
@@ -242,19 +242,19 @@ pub const ModelsApi = struct {
                     .blob_id = if (file.blob_id) |bid| try self.allocator.dupe(u8, bid) else null,
                     .is_gguf = true,
                 };
-                try gguf_files.append(file_copy);
+                try gguf_files.append(self.allocator, file_copy);
             }
         }
 
-        return gguf_files.toOwnedSlice();
+        return gguf_files.toOwnedSlice(self.allocator);
     }
 
     /// Check if a model exists
     pub fn modelExists(self: *Self, model_id: []const u8) !bool {
-        const path = try std.fmt.allocPrint(self.allocator, "/api/models/{s}", .{model_id});
-        defer self.allocator.free(path);
+        const url = try std.fmt.allocPrint(self.allocator, "{s}/api/models/{s}", .{ self.client.endpoint, model_id });
+        defer self.allocator.free(url);
 
-        var response = self.client.head(path) catch |err| {
+        var response = self.client.head(url) catch |err| {
             if (err == HubError.NotFound) return false;
             return err;
         };
@@ -277,8 +277,8 @@ pub const ModelsApi = struct {
     pub fn getFileMetadata(self: *Self, model_id: []const u8, filename: []const u8, revision: []const u8) !FileInfo {
         const url = try std.fmt.allocPrint(
             self.allocator,
-            "/{s}/resolve/{s}/{s}",
-            .{ model_id, revision, filename },
+            "{s}/{s}/resolve/{s}/{s}",
+            .{ self.client.endpoint, model_id, revision, filename },
         );
         defer self.allocator.free(url);
 

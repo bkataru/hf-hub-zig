@@ -15,16 +15,33 @@ const testing = std.testing;
 
 const hf = @import("hf-hub");
 
+var it_progress_called: bool = false;
+fn it_cb(_: hf.DownloadProgress) void {
+    it_progress_called = true;
+}
+
 // ============================================================================
 // Test Utilities
 // ============================================================================
 
-fn shouldSkipNetworkTests() bool {
-    return std.posix.getenv("SKIP_NETWORK_TESTS") != null;
+/// Cross-platform environment variable check
+fn hasEnvVar(allocator: std.mem.Allocator, name: []const u8) bool {
+    const value = std.process.getEnvVarOwned(allocator, name) catch return false;
+    allocator.free(value);
+    return true;
 }
 
-fn skipIfNoNetwork() !void {
-    if (shouldSkipNetworkTests()) {
+/// Cross-platform environment variable getter (returns owned slice)
+fn getEnvVar(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch return null;
+}
+
+fn shouldSkipNetworkTests(allocator: std.mem.Allocator) bool {
+    return hasEnvVar(allocator, "SKIP_NETWORK_TESTS");
+}
+
+fn skipIfNoNetwork(allocator: std.mem.Allocator) !void {
+    if (shouldSkipNetworkTests(allocator)) {
         return error.SkipZigTest;
     }
 }
@@ -34,9 +51,9 @@ fn skipIfNoNetwork() !void {
 // ============================================================================
 
 test "integration - search models returns results" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -55,9 +72,9 @@ test "integration - search models returns results" {
 }
 
 test "integration - search GGUF models" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -69,9 +86,9 @@ test "integration - search GGUF models" {
 }
 
 test "integration - search with pagination" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -98,29 +115,29 @@ test "integration - search with pagination" {
 // ============================================================================
 
 test "integration - get model info" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
     // Use a well-known public model
-    var model = try client.getModelInfo("bert-base-uncased");
+    var model = try client.getModelInfo("google-bert/bert-base-uncased");
     defer client.freeModel(&model);
 
-    try testing.expectEqualStrings("bert-base-uncased", model.id);
+    try testing.expectEqualStrings("google-bert/bert-base-uncased", model.id);
     try testing.expect(!model.private);
 }
 
 test "integration - model exists" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
     // Well-known model should exist
-    const exists = try client.modelExists("bert-base-uncased");
+    const exists = try client.modelExists("google-bert/bert-base-uncased");
     try testing.expect(exists);
 
     // Non-existent model should not exist
@@ -129,13 +146,13 @@ test "integration - model exists" {
 }
 
 test "integration - list model files" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
-    const files = try client.listFiles("bert-base-uncased");
+    const files = try client.listFiles("google-bert/bert-base-uncased");
     defer client.freeFileInfoSlice(files);
 
     // Should have some files
@@ -157,9 +174,9 @@ test "integration - list model files" {
 // ============================================================================
 
 test "integration - download small file" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -172,7 +189,7 @@ test "integration - download small file" {
 
     // Download a small file (config.json is usually small)
     const path = try client.downloadFileWithOptions(
-        "bert-base-uncased",
+        "google-bert/bert-base-uncased",
         "config.json",
         "main",
         tmp_path,
@@ -190,9 +207,9 @@ test "integration - download small file" {
 }
 
 test "integration - download with progress callback" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -202,28 +219,19 @@ test "integration - download with progress callback" {
     const tmp_path = try tmp_dir.dir.realpathAlloc(allocator, ".");
     defer allocator.free(tmp_path);
 
-    var progress_called = false;
-
-    const Callback = struct {
-        var called: *bool = undefined;
-
-        fn callback(_: hf.DownloadProgress) void {
-            called.* = true;
-        }
-    };
-    Callback.called = &progress_called;
+    it_progress_called = false;
 
     const path = try client.downloadFileWithOptions(
-        "bert-base-uncased",
+        "google-bert/bert-base-uncased",
         "config.json",
         "main",
         tmp_path,
-        Callback.callback,
+        it_cb,
     );
     defer allocator.free(path);
 
     // Progress callback should have been called
-    try testing.expect(progress_called);
+    try testing.expect(it_progress_called);
 }
 
 // ============================================================================
@@ -231,9 +239,9 @@ test "integration - download with progress callback" {
 // ============================================================================
 
 test "integration - check authentication status" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -243,12 +251,13 @@ test "integration - check authentication status" {
 }
 
 test "integration - whoami with token" {
-    try skipIfNoNetwork();
+    const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
 
     // Skip if no token available
-    const token = std.posix.getenv("HF_TOKEN") orelse return error.SkipZigTest;
+    const token = getEnvVar(allocator, "HF_TOKEN") orelse return error.SkipZigTest;
+    defer allocator.free(token);
 
-    const allocator = testing.allocator;
     var client = try hf.createAuthenticatedClient(allocator, token);
     defer client.deinit();
 
@@ -264,9 +273,8 @@ test "integration - whoami with token" {
 // ============================================================================
 
 test "integration - cache workflow" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
 
     // Create temp directory for cache
     var tmp_dir = testing.tmpDir(.{});
@@ -301,7 +309,7 @@ test "integration - cache workflow" {
 
     // Download to cache
     const cached_path = try client.downloadToCache(model_id, filename, revision, null);
-    _ = cached_path;
+    defer allocator.free(cached_path);
 
     // Now should be cached
     is_cached = try client.isCached(model_id, filename, revision);
@@ -321,9 +329,9 @@ test "integration - cache workflow" {
 // ============================================================================
 
 test "integration - handle not found error" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -333,17 +341,19 @@ test "integration - handle not found error" {
         // Should not succeed
         try testing.expect(false);
     } else |err| {
-        try testing.expectEqual(error.NotFound, err);
+        // Depending on Hub behavior, could be NotFound or Unauthorized
+        const is_expected = (err == error.NotFound) or (err == error.Unauthorized);
+        try testing.expect(is_expected);
     }
 }
 
 test "integration - handle unauthorized for private model without token" {
-    try skipIfNoNetwork();
+    const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
 
     // Skip if we have a token (can't test unauthorized)
-    if (std.posix.getenv("HF_TOKEN") != null) return error.SkipZigTest;
+    if (hasEnvVar(allocator, "HF_TOKEN")) return error.SkipZigTest;
 
-    const allocator = testing.allocator;
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -369,9 +379,9 @@ test "integration - handle unauthorized for private model without token" {
 // ============================================================================
 
 test "integration - rate limiter prevents overwhelming API" {
-    try skipIfNoNetwork();
-
     const allocator = testing.allocator;
+    try skipIfNoNetwork(allocator);
+
     var client = try hf.HubClient.init(allocator, null);
     defer client.deinit();
 
@@ -379,7 +389,7 @@ test "integration - rate limiter prevents overwhelming API" {
     // because the client has built-in rate limiting
     var i: usize = 0;
     while (i < 5) : (i += 1) {
-        const exists = try client.modelExists("bert-base-uncased");
+        const exists = try client.modelExists("google-bert/bert-base-uncased");
         try testing.expect(exists);
     }
 }

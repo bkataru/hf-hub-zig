@@ -570,6 +570,7 @@ pub const Cache = struct {
 // ============================================================================
 
 /// Get the default OS-specific cache directory
+/// Uses cross-platform environment access that works on all platforms including Windows
 pub fn getDefaultCacheDir(allocator: Allocator) ![]u8 {
     if (comptime builtin.os.tag == .windows) {
         // Windows: Use LOCALAPPDATA
@@ -585,18 +586,21 @@ pub fn getDefaultCacheDir(allocator: Allocator) ![]u8 {
         return error.NoCacheDirectory;
     } else if (comptime builtin.os.tag == .macos) {
         // macOS: Use ~/Library/Caches
-        if (std.posix.getenv("HOME")) |home| {
+        if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+            defer allocator.free(home);
             return std.fs.path.join(allocator, &.{ home, "Library", "Caches", "huggingface", "hub" });
-        }
+        } else |_| {}
         return error.NoCacheDirectory;
     } else {
         // Linux and others: Use XDG_CACHE_HOME or ~/.cache
-        if (std.posix.getenv("XDG_CACHE_HOME")) |xdg_cache| {
+        if (std.process.getEnvVarOwned(allocator, "XDG_CACHE_HOME")) |xdg_cache| {
+            defer allocator.free(xdg_cache);
             return std.fs.path.join(allocator, &.{ xdg_cache, "huggingface", "hub" });
-        }
-        if (std.posix.getenv("HOME")) |home| {
+        } else |_| {}
+        if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+            defer allocator.free(home);
             return std.fs.path.join(allocator, &.{ home, ".cache", "huggingface", "hub" });
-        }
+        } else |_| {}
         return error.NoCacheDirectory;
     }
 }
@@ -626,21 +630,21 @@ fn sanitizeRepoId(allocator: Allocator, repo_id: []const u8) ![]u8 {
 /// Convert sanitized repo ID back to original format
 /// Replaces '--' with '/'
 fn unsanitizeRepoId(allocator: Allocator, sanitized: []const u8) ![]u8 {
-    var result = std.array_list.Managed(u8).init(allocator);
-    errdefer result.deinit();
+    var result = std.ArrayListUnmanaged(u8){};
+    errdefer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < sanitized.len) {
         if (i + 1 < sanitized.len and sanitized[i] == '-' and sanitized[i + 1] == '-') {
-            try result.append('/');
+            try result.append(allocator, '/');
             i += 2;
         } else {
-            try result.append(sanitized[i]);
+            try result.append(allocator, sanitized[i]);
             i += 1;
         }
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(allocator);
 }
 
 /// Ensure a directory exists, creating it if necessary

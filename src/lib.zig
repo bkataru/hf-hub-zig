@@ -295,14 +295,15 @@ pub const HubClient = struct {
 
         // Build output path
         const output_path = try std.fs.path.join(self.allocator, &.{ out_dir, filename });
-        errdefer self.allocator.free(output_path);
+        // We duplicate for return; ensure we free the original before returning
+        defer self.allocator.free(output_path);
 
         // Download
         var dl = downloader.Downloader.init(self.allocator, &self.http_client);
         var result = try dl.download(url, output_path, progress_cb);
         defer result.deinit(self.allocator);
 
-        // Return the path (transfer ownership)
+        // Return a duplicate of the path (caller owns and must free)
         return try self.allocator.dupe(u8, output_path);
     }
 
@@ -323,7 +324,8 @@ pub const HubClient = struct {
 
         // Prepare cache path
         const cache_path = try self.file_cache.prepareCachePath(model_id, filename, revision);
-        errdefer self.allocator.free(cache_path);
+        // We will return a duplicate; free original to avoid leaks
+        defer self.allocator.free(cache_path);
 
         // Build URL
         const url = try self.http_client.buildDownloadUrl(model_id, filename, revision);
@@ -334,7 +336,7 @@ pub const HubClient = struct {
         var result = try dl.download(url, cache_path, progress_cb);
         defer result.deinit(self.allocator);
 
-        return cache_path;
+        return try self.allocator.dupe(u8, cache_path);
     }
 
     // ========================================================================

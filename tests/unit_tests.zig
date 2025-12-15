@@ -291,16 +291,13 @@ test "json.parseModel parses valid model JSON" {
         \\{"id":"test/model","modelId":"test/model","author":"test","downloads":100,"likes":50,"private":false}
     ;
 
-    // Use std.json.parseFromSlice directly to get the Parsed struct with arena
-    const parsed = try std.json.parseFromSlice(
-        hf.json.RawModel,
-        allocator,
-        json_str,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    );
-    defer parsed.deinit();
-
-    const result = parsed.value;
+    // Use the parseModel function which returns a ParsedModel
+    const result = try hf.json.parseModel(allocator, json_str);
+    defer {
+        allocator.free(result.id);
+        if (result.model_id) |mid| allocator.free(mid);
+        if (result.author) |a| allocator.free(a);
+    }
 
     try testing.expectEqualStrings("test/model", result.id);
     try testing.expectEqualStrings("test", result.author.?);

@@ -12,7 +12,6 @@ const fs = std.fs;
 
 const client_mod = @import("client.zig");
 const HttpClient = client_mod.HttpClient;
-const StreamingRequest = client_mod.StreamingRequest;
 const Config = @import("config.zig").Config;
 const errors = @import("errors.zig");
 const HubError = errors.HubError;
@@ -57,6 +56,28 @@ pub const DownloadResult = struct {
         allocator.free(self.path);
     }
 };
+
+/// Context for progress callback during download
+const ProgressContext = struct {
+    callback: ?ProgressCallback,
+    filename: []const u8,
+    start_time_ns: i128,
+    start_byte: u64,
+};
+
+/// Progress callback function that bridges to user callback
+fn progressBridge(ctx: *const ProgressContext, bytes_so_far: u64, total: ?u64) void {
+    if (ctx.callback) |cb| {
+        const progress = DownloadProgress{
+            .bytes_downloaded = bytes_so_far,
+            .total_bytes = total,
+            .start_time_ns = ctx.start_time_ns,
+            .current_time_ns = std.time.nanoTimestamp(),
+            .filename = ctx.filename,
+        };
+        cb(progress);
+    }
+}
 
 /// File downloader with streaming and progress support
 pub const Downloader = struct {
@@ -130,15 +151,7 @@ pub const Downloader = struct {
             }
         }
 
-        // Open streaming request
-        var request = try self.client.getStreaming(url, if (start_byte > 0) start_byte else null);
-        defer request.deinit();
-
-        // Get total size from response
-        const content_length = request.getContentLength();
-        const total_size = if (content_length) |cl| cl + start_byte else start_byte;
-
-        // Open output file (append if resuming)
+        // Open output file (append if resuming, create otherwise)
         var file = fs.cwd().openFile(part_path, .{
             .mode = .write_only,
         }) catch |err| switch (err) {
@@ -152,35 +165,23 @@ pub const Downloader = struct {
             file.seekTo(start_byte) catch return HubError.IoError;
         }
 
-        // Download in chunks
+        // Set up progress context
         const start_time = std.time.nanoTimestamp();
-        var bytes_downloaded: u64 = 0;
-        var reader = request.reader();
-        var buf: [8192]u8 = undefined;
-        const chunk_size = @min(options.chunk_size, buf.len);
+        const ctx = ProgressContext{
+            .callback = progress_cb,
+            .filename = std.fs.path.basename(output_path),
+            .start_time_ns = start_time,
+            .start_byte = start_byte,
+        };
 
-        while (true) {
-            const bytes_read = reader.readSliceShort(buf[0..chunk_size]) catch {
-                return HubError.NetworkError;
-            };
-
-            if (bytes_read == 0) break;
-
-            file.writeAll(buf[0..bytes_read]) catch return HubError.IoError;
-            bytes_downloaded += bytes_read;
-
-            // Call progress callback
-            if (progress_cb) |cb| {
-                const progress = DownloadProgress{
-                    .bytes_downloaded = start_byte + bytes_downloaded,
-                    .total_bytes = if (total_size > 0) total_size else null,
-                    .start_time_ns = start_time,
-                    .current_time_ns = std.time.nanoTimestamp(),
-                    .filename = std.fs.path.basename(output_path),
-                };
-                cb(progress);
-            }
-        }
+        // Perform the download
+        const result = try self.client.downloadToFileWithProgress(
+            url,
+            file,
+            if (start_byte > 0) start_byte else null,
+            &ctx,
+            progressBridge,
+        );
 
         // Rename .part file to final filename
         fs.cwd().rename(part_path, output_path) catch |err| switch (err) {
@@ -194,8 +195,8 @@ pub const Downloader = struct {
 
         return DownloadResult{
             .path = try self.allocator.dupe(u8, output_path),
-            .bytes_downloaded = bytes_downloaded,
-            .total_size = start_byte + bytes_downloaded,
+            .bytes_downloaded = result.bytes_downloaded,
+            .total_size = start_byte + result.bytes_downloaded,
             .was_resumed = was_resumed,
             .checksum_verified = false,
         };
@@ -277,7 +278,7 @@ pub const Downloader = struct {
 
         // Convert to hex string
         var hex_buf: [64]u8 = undefined;
-        const hex_hash = std.fmt.bufPrint(&hex_buf, "{x}", .{std.fmt.fmtSliceHexLower(&hash)}) catch return false;
+        const hex_hash = std.fmt.bufPrint(&hex_buf, "{s}", .{std.fmt.fmtSliceHexLower(&hash)}) catch return false;
 
         return std.mem.eql(u8, hex_hash, expected_sha256);
     }
@@ -320,7 +321,7 @@ pub fn defaultProgressCallback(progress: DownloadProgress) void {
 pub const BatchDownloader = struct {
     allocator: Allocator,
     downloader: Downloader,
-    results: std.array_list.Managed(BatchResult),
+    results: std.ArrayList(BatchResult),
 
     pub const BatchResult = struct {
         filename: []const u8,
@@ -344,7 +345,7 @@ pub const BatchDownloader = struct {
         return BatchDownloader{
             .allocator = allocator,
             .downloader = Downloader.init(allocator, http_client),
-            .results = std.array_list.Managed(BatchResult).init(allocator),
+            .results = std.ArrayList(BatchResult).init(allocator),
         };
     }
 

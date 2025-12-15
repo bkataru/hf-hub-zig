@@ -219,8 +219,6 @@ pub fn run(
     var fail_count: u32 = 0;
     var total_bytes: u64 = 0;
 
-    var progress_bar = ProgressBar.init();
-
     for (files_to_download.items) |file| {
         // Build output path
         const output_path = try std.fs.path.join(allocator, &.{ opts.output_dir, file.path });
@@ -238,15 +236,18 @@ pub fn run(
             };
         }
 
-        // Progress callback
-        const callback: ?types.ProgressCallback = if (use_progress) blk: {
-            break :blk struct {
-                fn cb(prog: DownloadProgress) void {
-                    var bar = ProgressBar.init();
-                    bar.render(prog);
-                }
-            }.cb;
-        } else null;
+        // Progress callback - simple standalone function that creates a temp progress bar
+        const SimpleProgressCallback = struct {
+            fn cb(progress: types.DownloadProgress) void {
+                var bar = ProgressBar.init();
+                bar.render(progress);
+            }
+        };
+
+        const callback: ?types.ProgressCallback = if (use_progress)
+            SimpleProgressCallback.cb
+        else
+            null;
 
         // Download using HubClient
         const downloaded_path = hub.downloadFileWithOptions(
@@ -257,7 +258,11 @@ pub fn run(
             callback,
         ) catch |err| {
             if (!global_opts.json) {
-                progress_bar.clearLine();
+                // Clear progress line if shown
+                if (use_progress) {
+                    const clear = "\r\x1b[2K";
+                    _ = stdout.write(clear) catch {};
+                }
                 var err_buf: [256]u8 = undefined;
                 const err_msg = std.fmt.bufPrint(&err_buf, "Failed to download {s}: {s}", .{ file.path, @errorName(err) }) catch "Download failed";
                 try formatting.formatError(stdout, err_msg, use_color, true);
@@ -269,8 +274,34 @@ pub fn run(
 
         // Success
         if (!global_opts.json) {
-            progress_bar.clearLine();
-            progress_bar.complete(file.path, file.size orelse 0);
+            if (use_progress) {
+                // Clear progress line and show completion
+                const clear = "\r\x1b[2K";
+                _ = stdout.write(clear) catch {};
+
+                var size_buf: [32]u8 = undefined;
+                const size_str = types.formatBytes(file.size orelse 0, &size_buf);
+                const checkmark = if (use_color) terminal.Color.green.format("✓") else "OK";
+                const styled_name = if (use_color) terminal.Color.cyan.format(file.path) else file.path;
+                try stdout.print("  {s} {s} ({s})\n", .{ checkmark, styled_name, size_str });
+            } else {
+                var size_buf: [32]u8 = undefined;
+                const size_str = types.formatBytes(file.size orelse 0, &size_buf);
+                if (use_color) {
+                    try stdout.print("{s}✓{s} {s}{s}{s} Downloaded {s}{s}{s}\n", .{
+                        terminal.ESC ++ "92m",
+                        terminal.RESET,
+                        terminal.ESC ++ "35m",
+                        file.path,
+                        terminal.RESET,
+                        terminal.ESC ++ "92m",
+                        size_str,
+                        terminal.RESET,
+                    });
+                } else {
+                    try stdout.print("✓ {s} Downloaded {s}\n", .{ file.path, size_str });
+                }
+            }
         }
 
         total_bytes += file.size orelse 0;

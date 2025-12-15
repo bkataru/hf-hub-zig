@@ -2,6 +2,11 @@
 //!
 //! This module provides utilities for parsing JSON responses from the
 //! HuggingFace Hub API using Zig's std.json with resilient defaults.
+//!
+//! The HuggingFace API can return fields in multiple formats:
+//! - `language` can be a string ("en") or array (["en", "fr"])
+//! - `datasets` can be a string or array
+//! This module handles both cases gracefully.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -48,34 +53,6 @@ pub const RawLfsInfo = struct {
     pointer_size: ?u64 = null,
 };
 
-/// Raw model structure from API
-pub const RawModel = struct {
-    id: []const u8 = "",
-    modelId: ?[]const u8 = null,
-    author: ?[]const u8 = null,
-    sha: ?[]const u8 = null,
-    lastModified: ?[]const u8 = null,
-    private: bool = false,
-    gated: ?bool = null,
-    disabled: bool = false,
-    library_name: ?[]const u8 = null,
-    tags: ?[][]const u8 = null,
-    pipeline_tag: ?[]const u8 = null,
-    siblings: ?[]RawSibling = null,
-    downloads: ?u64 = null,
-    likes: ?u64 = null,
-    trendingScore: ?f64 = null,
-    cardData: ?RawCardData = null,
-};
-
-/// Raw card data from API
-pub const RawCardData = struct {
-    description: ?[]const u8 = null,
-    license: ?[]const u8 = null,
-    language: ?[][]const u8 = null,
-    datasets: ?[][]const u8 = null,
-};
-
 /// Raw user structure from API (whoami endpoint)
 pub const RawUser = struct {
     name: []const u8 = "",
@@ -88,33 +65,287 @@ pub const RawUser = struct {
 };
 
 // ============================================================================
+// Flexible Parsing for Models (handles string/array polymorphism)
+// ============================================================================
+
+/// Parsed model with all fields properly converted
+pub const ParsedModel = struct {
+    id: []const u8,
+    model_id: ?[]const u8 = null,
+    author: ?[]const u8 = null,
+    sha: ?[]const u8 = null,
+    last_modified: ?[]const u8 = null,
+    private: bool = false,
+    gated: ?bool = null,
+    disabled: bool = false,
+    library_name: ?[]const u8 = null,
+    tags: ?[][]const u8 = null,
+    pipeline_tag: ?[]const u8 = null,
+    siblings: ?[]OwnedSibling = null,
+    downloads: ?u64 = null,
+    likes: ?u64 = null,
+    trending_score: ?f64 = null,
+    // Card data fields - flattened for easier handling
+    description: ?[]const u8 = null,
+    license: ?[]const u8 = null,
+    language: ?[][]const u8 = null,
+    datasets: ?[][]const u8 = null,
+};
+
+/// Parse a JSON string into a model, handling polymorphic fields
+pub fn parseModel(allocator: Allocator, json_str: []const u8) !ParsedModel {
+    // First, parse as dynamic JSON to handle polymorphic fields
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        json_str,
+        .{ .allocate = .alloc_always },
+    ) catch |err| {
+        return mapJsonError(err);
+    };
+    defer parsed.deinit();
+
+    return parseModelFromValue(allocator, parsed.value);
+}
+
+/// Parse a model from a JSON Value
+fn parseModelFromValue(allocator: Allocator, value: std.json.Value) !ParsedModel {
+    if (value != .object) {
+        return JsonError.InvalidJson;
+    }
+
+    const obj = value.object;
+
+    var model = ParsedModel{
+        .id = try dupeString(allocator, getStringField(obj, "id") orelse ""),
+    };
+    errdefer allocator.free(model.id);
+
+    // Simple string fields
+    if (getStringField(obj, "modelId")) |v| {
+        model.model_id = try allocator.dupe(u8, v);
+    }
+    if (getStringField(obj, "author")) |v| {
+        model.author = try allocator.dupe(u8, v);
+    }
+    if (getStringField(obj, "sha")) |v| {
+        model.sha = try allocator.dupe(u8, v);
+    }
+    if (getStringField(obj, "lastModified")) |v| {
+        model.last_modified = try allocator.dupe(u8, v);
+    }
+    if (getStringField(obj, "library_name")) |v| {
+        model.library_name = try allocator.dupe(u8, v);
+    }
+    if (getStringField(obj, "pipeline_tag")) |v| {
+        model.pipeline_tag = try allocator.dupe(u8, v);
+    }
+
+    // Boolean fields
+    model.private = getBoolField(obj, "private") orelse false;
+    model.gated = getBoolField(obj, "gated");
+    model.disabled = getBoolField(obj, "disabled") orelse false;
+
+    // Numeric fields
+    model.downloads = getIntField(obj, "downloads");
+    model.likes = getIntField(obj, "likes");
+    model.trending_score = getFloatField(obj, "trendingScore");
+
+    // Array fields
+    if (obj.get("tags")) |tags_val| {
+        model.tags = try parseStringArray(allocator, tags_val);
+    }
+
+    // Parse siblings
+    if (obj.get("siblings")) |siblings_val| {
+        model.siblings = try parseSiblingsFromValue(allocator, siblings_val);
+    }
+
+    // Parse cardData - handle polymorphic fields
+    if (obj.get("cardData")) |card_val| {
+        if (card_val == .object) {
+            const card_obj = card_val.object;
+
+            if (getStringField(card_obj, "description")) |v| {
+                model.description = try allocator.dupe(u8, v);
+            }
+            if (getStringField(card_obj, "license")) |v| {
+                model.license = try allocator.dupe(u8, v);
+            }
+
+            // Handle language - can be string or array
+            if (card_obj.get("language")) |lang_val| {
+                model.language = try parseStringOrArray(allocator, lang_val);
+            }
+
+            // Handle datasets - can be string or array
+            if (card_obj.get("datasets")) |ds_val| {
+                model.datasets = try parseStringOrArray(allocator, ds_val);
+            }
+        }
+    }
+
+    return model;
+}
+
+/// Parse a string that can be either a single string or an array of strings
+fn parseStringOrArray(allocator: Allocator, value: std.json.Value) !?[][]const u8 {
+    switch (value) {
+        .string => |s| {
+            // Single string - wrap in array
+            var result = try allocator.alloc([]const u8, 1);
+            result[0] = try allocator.dupe(u8, s);
+            return result;
+        },
+        .array => |arr| {
+            // Array of strings
+            var result = try allocator.alloc([]const u8, arr.items.len);
+            var count: usize = 0;
+            errdefer {
+                for (result[0..count]) |item| {
+                    allocator.free(item);
+                }
+                allocator.free(result);
+            }
+            for (arr.items) |item| {
+                if (item == .string) {
+                    result[count] = try allocator.dupe(u8, item.string);
+                    count += 1;
+                }
+            }
+            if (count < result.len) {
+                // Resize if some items weren't strings
+                const final = try allocator.realloc(result, count);
+                return final;
+            }
+            return result;
+        },
+        .null => return null,
+        else => return null,
+    }
+}
+
+/// Parse an array of strings
+fn parseStringArray(allocator: Allocator, value: std.json.Value) !?[][]const u8 {
+    if (value != .array) return null;
+
+    const arr = value.array;
+    var result = try allocator.alloc([]const u8, arr.items.len);
+    var count: usize = 0;
+    errdefer {
+        for (result[0..count]) |item| {
+            allocator.free(item);
+        }
+        allocator.free(result);
+    }
+
+    for (arr.items) |item| {
+        if (item == .string) {
+            result[count] = try allocator.dupe(u8, item.string);
+            count += 1;
+        }
+    }
+
+    if (count == 0) {
+        allocator.free(result);
+        return null;
+    }
+
+    if (count < result.len) {
+        return try allocator.realloc(result, count);
+    }
+    return result;
+}
+
+/// Sibling with owned strings for proper memory management
+pub const OwnedSibling = struct {
+    rfilename: []const u8,
+    size: ?u64 = null,
+    blob_id: ?[]const u8 = null,
+
+    pub fn deinit(self: *OwnedSibling, alloc: Allocator) void {
+        alloc.free(self.rfilename);
+        if (self.blob_id) |bid| alloc.free(bid);
+    }
+};
+
+/// Parse siblings array from JSON Value - returns owned copies of strings
+fn parseSiblingsFromValue(allocator: Allocator, value: std.json.Value) !?[]OwnedSibling {
+    if (value != .array) return null;
+
+    const arr = value.array;
+    if (arr.items.len == 0) return null;
+
+    var result = try allocator.alloc(OwnedSibling, arr.items.len);
+    var count: usize = 0;
+    errdefer {
+        for (result[0..count]) |*sib| {
+            sib.deinit(allocator);
+        }
+        allocator.free(result);
+    }
+
+    for (arr.items) |item| {
+        if (item == .object) {
+            const obj = item.object;
+            const rfilename = getStringField(obj, "rfilename") orelse continue;
+
+            result[count] = OwnedSibling{
+                .rfilename = try allocator.dupe(u8, rfilename),
+                .size = getIntField(obj, "size"),
+                .blob_id = if (getStringField(obj, "blobId")) |bid| try allocator.dupe(u8, bid) else null,
+            };
+            count += 1;
+        }
+    }
+
+    if (count == 0) {
+        allocator.free(result);
+        return null;
+    }
+
+    if (count < result.len) {
+        return try allocator.realloc(result, count);
+    }
+    return result;
+}
+
+// ============================================================================
 // Parsing Functions
 // ============================================================================
 
-/// Parse a JSON string into a RawModel
-pub fn parseModel(allocator: Allocator, json_str: []const u8) !RawModel {
-    const parsed = std.json.parseFromSlice(
-        RawModel,
+/// Parse a JSON string into an array of models (search results)
+pub fn parseModels(allocator: Allocator, json_str: []const u8) ![]ParsedModel {
+    var parsed = std.json.parseFromSlice(
+        std.json.Value,
         allocator,
         json_str,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
+        .{ .allocate = .alloc_always },
     ) catch |err| {
         return mapJsonError(err);
     };
-    return parsed.value;
-}
+    defer parsed.deinit();
 
-/// Parse a JSON string into an array of RawModel (search results)
-pub fn parseModels(allocator: Allocator, json_str: []const u8) ![]RawModel {
-    const parsed = std.json.parseFromSlice(
-        []RawModel,
-        allocator,
-        json_str,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch |err| {
-        return mapJsonError(err);
-    };
-    return parsed.value;
+    if (parsed.value != .array) {
+        return JsonError.InvalidJson;
+    }
+
+    const arr = parsed.value.array;
+    var result = try allocator.alloc(ParsedModel, arr.items.len);
+    var count: usize = 0;
+    errdefer {
+        for (result[0..count]) |*m| {
+            freeModelFields(allocator, m);
+        }
+        allocator.free(result);
+    }
+
+    for (arr.items) |item| {
+        result[count] = try parseModelFromValue(allocator, item);
+        count += 1;
+    }
+
+    return result;
 }
 
 /// Parse a JSON string into a RawUser
@@ -143,25 +374,41 @@ pub fn parseSiblings(allocator: Allocator, json_str: []const u8) ![]RawSibling {
     return parsed.value;
 }
 
-/// Free parsed model data
-pub fn freeModel(allocator: Allocator, model: *RawModel) void {
-    // The std.json parser with .alloc_always allocates all strings
-    // We need to use the parsed result's arena or free individual fields
-    _ = allocator;
-    _ = model;
-    // When using parseFromSlice, the returned Parsed struct has an arena
-    // that should be used for cleanup. For now, caller manages memory.
-}
+/// Free model fields that were allocated
+pub fn freeModelFields(allocator: Allocator, model: *ParsedModel) void {
+    allocator.free(model.id);
+    if (model.model_id) |v| allocator.free(v);
+    if (model.author) |v| allocator.free(v);
+    if (model.sha) |v| allocator.free(v);
+    if (model.last_modified) |v| allocator.free(v);
+    if (model.library_name) |v| allocator.free(v);
+    if (model.pipeline_tag) |v| allocator.free(v);
+    if (model.description) |v| allocator.free(v);
+    if (model.license) |v| allocator.free(v);
 
-/// Free parsed models array
-pub fn freeModels(allocator: Allocator, models: []RawModel) void {
-    _ = allocator;
-    _ = models;
-    // Memory managed by caller via Parsed struct's arena
+    if (model.tags) |tags| {
+        for (tags) |tag| allocator.free(tag);
+        allocator.free(tags);
+    }
+    if (model.language) |langs| {
+        for (langs) |lang| allocator.free(lang);
+        allocator.free(langs);
+    }
+    if (model.datasets) |ds| {
+        for (ds) |d| allocator.free(d);
+        allocator.free(ds);
+    }
+    if (model.siblings) |sibs| {
+        for (sibs) |*sib| {
+            var s = sib.*;
+            s.deinit(allocator);
+        }
+        allocator.free(sibs);
+    }
 }
 
 // ============================================================================
-// Conversion Functions (Raw -> Domain Types)
+// Conversion Functions (Parsed -> Domain Types)
 // ============================================================================
 
 /// Convert RawSibling to types.Sibling with owned memory
@@ -173,14 +420,14 @@ pub fn toSibling(allocator: Allocator, raw: RawSibling) !types.Sibling {
     };
 }
 
-/// Convert RawModel to types.Model with owned memory
-pub fn toModel(allocator: Allocator, raw: RawModel) !types.Model {
+/// Convert ParsedModel to types.Model with owned memory
+pub fn toModel(allocator: Allocator, raw: ParsedModel) !types.Model {
     var model = types.Model{
         .id = try allocator.dupe(u8, raw.id),
-        .model_id = if (raw.modelId) |mid| try allocator.dupe(u8, mid) else null,
+        .model_id = if (raw.model_id) |mid| try allocator.dupe(u8, mid) else null,
         .author = if (raw.author) |a| try allocator.dupe(u8, a) else null,
         .sha = if (raw.sha) |s| try allocator.dupe(u8, s) else null,
-        .last_modified = if (raw.lastModified) |lm| try allocator.dupe(u8, lm) else null,
+        .last_modified = if (raw.last_modified) |lm| try allocator.dupe(u8, lm) else null,
         .private = raw.private,
         .gated = raw.gated,
         .disabled = raw.disabled,
@@ -188,7 +435,7 @@ pub fn toModel(allocator: Allocator, raw: RawModel) !types.Model {
         .pipeline_tag = if (raw.pipeline_tag) |pt| try allocator.dupe(u8, pt) else null,
         .downloads = raw.downloads,
         .likes = raw.likes,
-        .trending_score = raw.trendingScore,
+        .trending_score = raw.trending_score,
     };
 
     // Convert tags
@@ -204,21 +451,25 @@ pub fn toModel(allocator: Allocator, raw: RawModel) !types.Model {
     if (raw.siblings) |raw_siblings| {
         var siblings = try allocator.alloc(types.Sibling, raw_siblings.len);
         for (raw_siblings, 0..) |sib, i| {
-            siblings[i] = try toSibling(allocator, sib);
+            siblings[i] = types.Sibling{
+                .rfilename = try allocator.dupe(u8, sib.rfilename),
+                .size = sib.size,
+                .blob_id = if (sib.blob_id) |bid| try allocator.dupe(u8, bid) else null,
+            };
         }
         model.siblings = siblings;
     }
 
     // Convert card data
-    if (raw.cardData) |raw_cd| {
-        model.card_data = try toCardData(allocator, raw_cd);
+    if (raw.description != null or raw.license != null or raw.language != null or raw.datasets != null) {
+        model.card_data = try toCardData(allocator, raw);
     }
 
     return model;
 }
 
-/// Convert RawCardData to types.CardData with owned memory
-pub fn toCardData(allocator: Allocator, raw: RawCardData) !types.CardData {
+/// Convert parsed card data fields to types.CardData with owned memory
+pub fn toCardData(allocator: Allocator, raw: ParsedModel) !types.CardData {
     var cd = types.CardData{
         .description = if (raw.description) |d| try allocator.dupe(u8, d) else null,
         .license = if (raw.license) |l| try allocator.dupe(u8, l) else null,
@@ -263,19 +514,16 @@ pub fn toUser(allocator: Allocator, raw: RawUser) !types.User {
 
 /// Convert a value to JSON string
 pub fn stringify(allocator: Allocator, value: anytype) ![]u8 {
-    // Use std.json.Stringify.valueAlloc for Zig 0.15
-    const result = std.json.Stringify.valueAlloc(allocator, value, .{}) catch |err| {
+    return std.json.Stringify.valueAlloc(allocator, value, .{}) catch |err| {
         return mapJsonError(err);
     };
-    return result;
 }
 
 /// Convert a value to pretty-printed JSON string
 pub fn stringifyPretty(allocator: Allocator, value: anytype) ![]u8 {
-    const result = std.json.Stringify.valueAlloc(allocator, value, .{ .whitespace = .indent_2 }) catch |err| {
+    return std.json.Stringify.valueAlloc(allocator, value, .{ .whitespace = .indent_2 }) catch |err| {
         return mapJsonError(err);
     };
-    return result;
 }
 
 // ============================================================================
@@ -291,15 +539,59 @@ fn mapJsonError(err: anyerror) JsonError {
     };
 }
 
-/// Extract a string field from a JSON object, returning null if not found
-pub fn getOptionalString(obj: std.json.Value, key: []const u8) ?[]const u8 {
-    if (obj != .object) return null;
-    if (obj.object.get(key)) |val| {
+/// Helper to duplicate a string
+fn dupeString(allocator: Allocator, s: []const u8) ![]const u8 {
+    return allocator.dupe(u8, s);
+}
+
+/// Get a string field from a JSON object
+fn getStringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    if (obj.get(key)) |val| {
         if (val == .string) {
             return val.string;
         }
     }
     return null;
+}
+
+/// Get a boolean field from a JSON object
+fn getBoolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
+    if (obj.get(key)) |val| {
+        if (val == .bool) {
+            return val.bool;
+        }
+    }
+    return null;
+}
+
+/// Get an integer field from a JSON object
+fn getIntField(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    if (obj.get(key)) |val| {
+        if (val == .integer) {
+            if (val.integer >= 0) {
+                return @intCast(val.integer);
+            }
+        }
+    }
+    return null;
+}
+
+/// Get a float field from a JSON object
+fn getFloatField(obj: std.json.ObjectMap, key: []const u8) ?f64 {
+    if (obj.get(key)) |val| {
+        switch (val) {
+            .float => return val.float,
+            .integer => return @floatFromInt(val.integer),
+            else => return null,
+        }
+    }
+    return null;
+}
+
+/// Extract a string field from a JSON object, returning null if not found
+pub fn getOptionalString(obj: std.json.Value, key: []const u8) ?[]const u8 {
+    if (obj != .object) return null;
+    return getStringField(obj.object, key);
 }
 
 /// Extract a required string field from a JSON object
@@ -310,10 +602,8 @@ pub fn getRequiredString(obj: std.json.Value, key: []const u8) ![]const u8 {
 /// Extract an optional integer field from a JSON object
 pub fn getOptionalInt(comptime T: type, obj: std.json.Value, key: []const u8) ?T {
     if (obj != .object) return null;
-    if (obj.object.get(key)) |val| {
-        if (val == .integer) {
-            return @intCast(val.integer);
-        }
+    if (getIntField(obj.object, key)) |val| {
+        return @intCast(val);
     }
     return null;
 }
@@ -321,12 +611,7 @@ pub fn getOptionalInt(comptime T: type, obj: std.json.Value, key: []const u8) ?T
 /// Extract an optional boolean field from a JSON object
 pub fn getOptionalBool(obj: std.json.Value, key: []const u8) ?bool {
     if (obj != .object) return null;
-    if (obj.object.get(key)) |val| {
-        if (val == .bool) {
-            return val.bool;
-        }
-    }
-    return null;
+    return getBoolField(obj.object, key);
 }
 
 /// Check if JSON value is null or missing
@@ -348,17 +633,53 @@ test "parseModel - basic model" {
         \\{"id":"test/model","modelId":"test/model","downloads":1000,"likes":50}
     ;
 
-    var parsed = std.json.parseFromSlice(
-        RawModel,
-        allocator,
-        json,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch unreachable;
-    defer parsed.deinit();
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
 
-    try std.testing.expectEqualStrings("test/model", parsed.value.id);
-    try std.testing.expectEqual(@as(?u64, 1000), parsed.value.downloads);
-    try std.testing.expectEqual(@as(?u64, 50), parsed.value.likes);
+    try std.testing.expectEqualStrings("test/model", parsed.id);
+    try std.testing.expectEqual(@as(?u64, 1000), parsed.downloads);
+    try std.testing.expectEqual(@as(?u64, 50), parsed.likes);
+}
+
+test "parseModel - with cardData string language" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"id":"test/model","cardData":{"language":"en","license":"mit"}}
+    ;
+
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
+
+    try std.testing.expectEqualStrings("test/model", parsed.id);
+    try std.testing.expectEqualStrings("mit", parsed.license.?);
+    try std.testing.expect(parsed.language != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.language.?.len);
+    try std.testing.expectEqualStrings("en", parsed.language.?[0]);
+}
+
+test "parseModel - with cardData array language" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"id":"test/model","cardData":{"language":["en","fr","de"]}}
+    ;
+
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
+
+    try std.testing.expect(parsed.language != null);
+    try std.testing.expectEqual(@as(usize, 3), parsed.language.?.len);
+    try std.testing.expectEqualStrings("en", parsed.language.?[0]);
+    try std.testing.expectEqualStrings("fr", parsed.language.?[1]);
+    try std.testing.expectEqualStrings("de", parsed.language.?[2]);
 }
 
 test "parseModel - with siblings" {
@@ -367,18 +688,16 @@ test "parseModel - with siblings" {
         \\{"id":"test/model","siblings":[{"rfilename":"model.gguf","size":1024}]}
     ;
 
-    var parsed = std.json.parseFromSlice(
-        RawModel,
-        allocator,
-        json,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch unreachable;
-    defer parsed.deinit();
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
 
-    try std.testing.expect(parsed.value.siblings != null);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.siblings.?.len);
-    try std.testing.expectEqualStrings("model.gguf", parsed.value.siblings.?[0].rfilename);
-    try std.testing.expectEqual(@as(?u64, 1024), parsed.value.siblings.?[0].size);
+    try std.testing.expect(parsed.siblings != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.siblings.?.len);
+    try std.testing.expectEqualStrings("model.gguf", parsed.siblings.?[0].rfilename);
+    try std.testing.expectEqual(@as(?u64, 1024), parsed.siblings.?[0].size);
 }
 
 test "parseUser - basic user" {
@@ -406,18 +725,19 @@ test "parseModels - array of models" {
         \\[{"id":"model1"},{"id":"model2"},{"id":"model3"}]
     ;
 
-    var parsed = std.json.parseFromSlice(
-        []RawModel,
-        allocator,
-        json,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch unreachable;
-    defer parsed.deinit();
+    const models = try parseModels(allocator, json);
+    defer {
+        for (models) |*m| {
+            var model = m.*;
+            freeModelFields(allocator, &model);
+        }
+        allocator.free(models);
+    }
 
-    try std.testing.expectEqual(@as(usize, 3), parsed.value.len);
-    try std.testing.expectEqualStrings("model1", parsed.value[0].id);
-    try std.testing.expectEqualStrings("model2", parsed.value[1].id);
-    try std.testing.expectEqualStrings("model3", parsed.value[2].id);
+    try std.testing.expectEqual(@as(usize, 3), models.len);
+    try std.testing.expectEqualStrings("model1", models[0].id);
+    try std.testing.expectEqualStrings("model2", models[1].id);
+    try std.testing.expectEqualStrings("model3", models[2].id);
 }
 
 test "toModel - conversion with owned memory" {
@@ -426,15 +746,13 @@ test "toModel - conversion with owned memory" {
         \\{"id":"test/model","downloads":500}
     ;
 
-    var parsed = std.json.parseFromSlice(
-        RawModel,
-        allocator,
-        json,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch unreachable;
-    defer parsed.deinit();
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
 
-    var model = try toModel(allocator, parsed.value);
+    var model = try toModel(allocator, parsed);
     defer model.deinit(allocator);
 
     try std.testing.expectEqualStrings("test/model", model.id);
@@ -457,20 +775,21 @@ test "stringify - basic struct" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"count\":42") != null);
 }
 
-test "ignore unknown fields" {
+test "parseModel - handles missing optional fields" {
     const allocator = std.testing.allocator;
-    // JSON with extra fields that aren't in our struct
+    // JSON with minimal fields
     const json =
-        \\{"id":"test","unknownField":"value","anotherUnknown":123}
+        \\{"id":"minimal/model"}
     ;
 
-    var parsed = std.json.parseFromSlice(
-        RawModel,
-        allocator,
-        json,
-        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch unreachable;
-    defer parsed.deinit();
+    const parsed = try parseModel(allocator, json);
+    defer {
+        var m = parsed;
+        freeModelFields(allocator, &m);
+    }
 
-    try std.testing.expectEqualStrings("test", parsed.value.id);
+    try std.testing.expectEqualStrings("minimal/model", parsed.id);
+    try std.testing.expect(parsed.author == null);
+    try std.testing.expect(parsed.downloads == null);
+    try std.testing.expect(parsed.tags == null);
 }

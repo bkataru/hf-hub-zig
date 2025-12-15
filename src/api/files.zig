@@ -37,14 +37,14 @@ pub const FilesApi = struct {
         revision: []const u8,
     ) !FileInfo {
         // Build the resolve URL: /{repo_id}/resolve/{revision}/{filename}
-        const path = try std.fmt.allocPrint(
+        const url = try std.fmt.allocPrint(
             self.allocator,
-            "/{s}/resolve/{s}/{s}",
-            .{ repo_id, revision, filename },
+            "{s}/{s}/resolve/{s}/{s}",
+            .{ self.client.endpoint, repo_id, revision, filename },
         );
-        defer self.allocator.free(path);
+        defer self.allocator.free(url);
 
-        var response = try self.client.head(path);
+        var response = try self.client.head(url);
         defer response.deinit();
 
         if (!response.isSuccess()) {
@@ -75,14 +75,14 @@ pub const FilesApi = struct {
         filename: []const u8,
         revision: []const u8,
     ) !bool {
-        const path = try std.fmt.allocPrint(
+        const url = try std.fmt.allocPrint(
             self.allocator,
-            "/{s}/resolve/{s}/{s}",
-            .{ repo_id, revision, filename },
+            "{s}/{s}/resolve/{s}/{s}",
+            .{ self.client.endpoint, repo_id, revision, filename },
         );
-        defer self.allocator.free(path);
+        defer self.allocator.free(url);
 
-        var response = self.client.head(path) catch |err| {
+        var response = self.client.head(url) catch |err| {
             switch (err) {
                 HubError.NotFound => return false,
                 else => return err,
@@ -152,18 +152,18 @@ pub const FilesApi = struct {
         files: []const FileInfo,
         extension: []const u8,
     ) ![]FileInfo {
-        var result = std.array_list.Managed(FileInfo).init(self.allocator);
-        errdefer result.deinit();
+        var result = std.ArrayListUnmanaged(FileInfo){};
+        errdefer result.deinit(self.allocator);
 
         for (files) |file| {
             if (std.mem.endsWith(u8, file.filename, extension) or
                 std.mem.endsWith(u8, file.path, extension))
             {
-                try result.append(file);
+                try result.append(self.allocator, file);
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Get only GGUF files from a list
@@ -171,16 +171,16 @@ pub const FilesApi = struct {
         self: *Self,
         files: []const FileInfo,
     ) ![]FileInfo {
-        var result = std.array_list.Managed(FileInfo).init(self.allocator);
-        errdefer result.deinit();
+        var result = std.ArrayListUnmanaged(FileInfo){};
+        errdefer result.deinit(self.allocator);
 
         for (files) |file| {
             if (file.is_gguf or FileInfo.checkIsGguf(file.path)) {
-                try result.append(file);
+                try result.append(self.allocator, file);
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Calculate total size of files
