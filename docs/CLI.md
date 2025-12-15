@@ -110,13 +110,11 @@ hf-hub download [OPTIONS] <MODEL_ID> [FILE]
 |--------|-------------|
 | `-o, --output <DIR>` | Output directory (default: current directory) |
 | `--revision <REV>` | Git revision/branch (default: `main`) |
-| `--use-cache` | Check cache first before downloading (default: true) |
 | `--no-cache` | Bypass cache, always download |
 | `--no-resume` | Don't resume partial downloads |
 | `--parallel <N>` | Number of parallel downloads (default: 1) |
 | `--filter <PATTERN>` | Download files matching pattern |
 | `--gguf-only` | Only download .gguf files |
-| `--dry-run` | Show what would be downloaded without downloading |
 
 **Examples:**
 
@@ -132,9 +130,6 @@ hf-hub download TheBloke/Llama-2-7B-GGUF --gguf-only --parallel 4
 
 # Download with pattern matching
 hf-hub download TheBloke/Llama-2-7B-GGUF --filter "Q4_K*"
-
-# Check what would be downloaded
-hf-hub download TheBloke/Llama-2-7B-GGUF --gguf-only --dry-run
 
 # Download from specific revision
 hf-hub download meta-llama/Llama-2-7b-hf --revision v1.0
@@ -340,23 +335,14 @@ Output:
 Show current authenticated user information.
 
 ```bash
-hf-hub user [OPTIONS]
+hf-hub user
 ```
-
-**Options:**
-
-| Option | Description |
-|--------|-------------|
-| `--check` | Only check if authenticated (exit code 0 if yes, 1 if no) |
 
 **Examples:**
 
 ```bash
 # Show user info
 hf-hub user
-
-# Check authentication status
-hf-hub user --check && echo "Authenticated" || echo "Not authenticated"
 ```
 
 **Output:**
@@ -397,21 +383,6 @@ Not authenticated. Set HF_TOKEN environment variable or use --token.
 | `HF_HOME` | Override cache directory |
 | `HF_TIMEOUT` | Request timeout in milliseconds |
 | `NO_COLOR` | Disable colored output when set to any value |
-
-## Shell Completion
-
-Generate shell completion scripts:
-
-```bash
-# Bash
-hf-hub --completions bash > ~/.local/share/bash-completion/completions/hf-hub
-
-# Zsh
-hf-hub --completions zsh > ~/.zfunc/_hf-hub
-
-# Fish
-hf-hub --completions fish > ~/.config/fish/completions/hf-hub.fish
-```
 
 ## Examples
 
