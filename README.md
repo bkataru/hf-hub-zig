@@ -21,16 +21,39 @@ Zig library and CLI for interacting with the HuggingFace Hub API, with a focus o
 
 ### As a Library
 
-Add to your `build.zig.zon`:
+#### Using `zig fetch` (Recommended)
+
+The easiest way to add hf-hub-zig to your project is using `zig fetch`, which automatically downloads the package and computes the hash for you:
+
+```bash
+# Fetch the latest version from the main branch
+zig fetch --save git+https://github.com/bkataru/hf-hub-zig.git
+
+# Or fetch a specific tagged release
+zig fetch --save https://github.com/bkataru/hf-hub-zig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+This will automatically add the dependency to your `build.zig.zon` with the correct hash.
+
+#### Manual Installation
+
+Alternatively, you can manually add to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
     .hf_hub_zig = .{
-        .url = "https://github.com/bkataru/hf-hub-zig/archive/v0.1.0.tar.gz",
-        .hash = "...",
+        // For the latest from main branch:
+        .url = "git+https://github.com/bkataru/hf-hub-zig.git",
+        .hash = "...",  // Run `zig build` and it will tell you the expected hash
+        
+        // Or for a specific commit/tag:
+        // .url = "https://github.com/bkataru/hf-hub-zig/archive/<commit-sha>.tar.gz",
+        // .hash = "...",
     },
 },
 ```
+
+#### Configure `build.zig`
 
 Then in your `build.zig`:
 

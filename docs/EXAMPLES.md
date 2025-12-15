@@ -4,6 +4,7 @@ This document provides detailed examples for common use cases.
 
 ## Table of Contents
 
+- [Installation](#installation)
 - [Basic Usage](#basic-usage)
 - [Search Operations](#search-operations)
 - [Downloading Files](#downloading-files)
@@ -12,6 +13,38 @@ This document provides detailed examples for common use cases.
 - [Authentication](#authentication)
 - [Error Handling](#error-handling)
 - [Batch Operations](#batch-operations)
+
+---
+
+## Installation
+
+Before running these examples, add hf-hub-zig to your project:
+
+### Using `zig fetch` (Recommended)
+
+```bash
+# Fetch the latest version from the main branch
+zig fetch --save git+https://github.com/bkataru/hf-hub-zig.git
+
+# Or fetch a specific tagged release
+zig fetch --save https://github.com/bkataru/hf-hub-zig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+This automatically updates your `build.zig.zon` with the dependency and computed hash.
+
+### Configure `build.zig`
+
+Add the import to your executable:
+
+```zig
+const hf_hub_dep = b.dependency("hf_hub_zig", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("hf-hub", hf_hub_dep.module("hf-hub"));
+```
+
+Now you can use `@import("hf-hub")` in your code.
 
 ---
 

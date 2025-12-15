@@ -4,6 +4,8 @@ This document provides complete API documentation for the hf-hub-zig library.
 
 ## Table of Contents
 
+- [Installation](#installation)
+
 - [HubClient](#hubclient)
 - [Configuration](#configuration)
 - [Types](#types)
@@ -11,6 +13,54 @@ This document provides complete API documentation for the hf-hub-zig library.
 - [Rate Limiting & Retry](#rate-limiting--retry)
 - [Cache](#cache)
 - [Progress Tracking](#progress-tracking)
+
+---
+
+## Installation
+
+### Using `zig fetch` (Recommended)
+
+The easiest way to add hf-hub-zig to your project is using `zig fetch`, which automatically downloads the package and computes the hash for you:
+
+```bash
+# Fetch the latest version from the main branch
+zig fetch --save git+https://github.com/bkataru/hf-hub-zig.git
+
+# Or fetch a specific tagged release
+zig fetch --save https://github.com/bkataru/hf-hub-zig/archive/refs/tags/v0.1.0.tar.gz
+```
+
+This will automatically add the dependency to your `build.zig.zon` with the correct hash.
+
+### Manual Installation
+
+Alternatively, you can manually add to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .hf_hub_zig = .{
+        // For the latest from main branch:
+        .url = "git+https://github.com/bkataru/hf-hub-zig.git",
+        .hash = "...",  // Run `zig build` and it will tell you the expected hash
+        
+        // Or for a specific commit:
+        // .url = "git+https://github.com/bkataru/hf-hub-zig.git#<commit-sha>",
+        // .hash = "...",
+    },
+},
+```
+
+### Configure `build.zig`
+
+Add the dependency to your executable or library:
+
+```zig
+const hf_hub_dep = b.dependency("hf_hub_zig", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("hf-hub", hf_hub_dep.module("hf-hub"));
+```
 
 ---
 

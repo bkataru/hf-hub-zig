@@ -33,6 +33,51 @@ zig build -Doptimize=ReleaseSafe
 
 The CLI binary is output to `zig-out/bin/hf-hub`.
 
+## Using as a Dependency
+
+### Adding to Your Project with `zig fetch`
+
+The recommended way to add hf-hub-zig as a dependency is using `zig fetch`:
+
+```bash
+# Fetch the latest version from the main branch
+zig fetch --save git+https://github.com/bkataru/hf-hub-zig.git
+
+# Or fetch a specific tagged release
+zig fetch --save https://github.com/bkataru/hf-hub-zig/archive/refs/tags/v0.1.0.tar.gz
+
+# Or fetch a specific commit
+zig fetch --save git+https://github.com/bkataru/hf-hub-zig.git#<commit-sha>
+```
+
+The `--save` flag automatically updates your `build.zig.zon` with the dependency and computed hash.
+
+### Manual Dependency Configuration
+
+If you prefer to manually configure, add to your `build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .hf_hub_zig = .{
+        // Latest from main branch:
+        .url = "git+https://github.com/bkataru/hf-hub-zig.git",
+        .hash = "...",  // Run `zig build` to get the expected hash
+    },
+},
+```
+
+Then in your `build.zig`:
+
+```zig
+const hf_hub_dep = b.dependency("hf_hub_zig", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("hf-hub", hf_hub_dep.module("hf-hub"));
+```
+
+> **Tip**: Using `git+https://` URLs allows you to always get the latest version without hardcoding version numbers. Zig will cache the dependency based on the computed hash.
+
 ### Run Tests
 
 ```bash
