@@ -1,5 +1,8 @@
 # hf-hub-zig
 
+[![Zig](https://img.shields.io/badge/Zig-0.15%2B-orange)](https://ziglang.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Zig library and CLI for interacting with the HuggingFace Hub API, with a focus on GGUF model discovery, searching, viewing, and downloading.
 
 ## Features
