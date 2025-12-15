@@ -259,7 +259,7 @@ pub const HttpClient = struct {
             var transfer_buffer: [8192]u8 align(8) = undefined;
             var mutable_response = response;
             const body_reader = mutable_response.reader(&transfer_buffer);
-            response_body = body_reader.allocRemaining(self.allocator, std.io.Limit.limited(MAX_RESPONSE_SIZE)) catch |err| {
+            response_body = body_reader.allocRemaining(self.allocator, .unlimited) catch |err| {
                 switch (err) {
                     error.StreamTooLong => return HubError.ResponseTooLarge,
                     else => return HubError.NetworkError,
@@ -369,7 +369,8 @@ pub const HttpClient = struct {
 
         // Read body and write to file - all in one scope
         var transfer_buffer: [8192]u8 = undefined;
-        const body_reader = response.reader(&transfer_buffer);
+        var mutable_response = response;
+        const body_reader = mutable_response.reader(&transfer_buffer);
         var bytes_downloaded: u64 = 0;
 
         var read_buf: [8192]u8 = undefined;
@@ -466,25 +467,6 @@ pub const HttpClient = struct {
             return mapConnectionError(err);
         };
 
-        // Debug: Check the reader state after receiveHead
-        if (builtin.mode == .Debug) {
-            const reader_state = req.reader.state;
-            switch (reader_state) {
-                .ready => std.debug.print("DEBUG: reader state is .ready (WRONG!)\n", .{}),
-                .received_head => std.debug.print("DEBUG: reader state is .received_head (correct)\n", .{}),
-                .body_none => std.debug.print("DEBUG: reader state is .body_none\n", .{}),
-                .body_remaining_content_length => |len| std.debug.print("DEBUG: reader state is .body_remaining_content_length: {}\n", .{len}),
-                .body_remaining_chunk_len => std.debug.print("DEBUG: reader state is .body_remaining_chunk_len\n", .{}),
-                .closing => std.debug.print("DEBUG: reader state is .closing\n", .{}),
-            }
-            std.debug.print("DEBUG: response.head.transfer_encoding = {}\n", .{response.head.transfer_encoding});
-            std.debug.print("DEBUG: response.head.content_length = {?}\n", .{response.head.content_length});
-            std.debug.print("DEBUG: &req = {*}\n", .{&req});
-            std.debug.print("DEBUG: response.request = {*}\n", .{response.request});
-            std.debug.print("DEBUG: &req.reader = {*}\n", .{&req.reader});
-            std.debug.print("DEBUG: &response.request.reader = {*}\n", .{&response.request.reader});
-        }
-
         // Check status
         const status_code = @intFromEnum(response.head.status);
         if (status_code >= 400) {
@@ -494,15 +476,8 @@ pub const HttpClient = struct {
             return HubError.InvalidResponse;
         }
 
-        // Get content-length from response headers
-        var content_length: ?u64 = null;
-        var header_iter = response.head.iterateHeaders();
-        while (header_iter.next()) |header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
-                content_length = std.fmt.parseInt(u64, header.value, 10) catch null;
-                break;
-            }
-        }
+        // Get content-length from response head (already parsed by std lib)
+        const content_length = response.head.content_length;
 
         // Calculate total size including resumed bytes
         const total_size: ?u64 = if (content_length) |cl|
@@ -510,53 +485,30 @@ pub const HttpClient = struct {
         else
             null;
 
-        // Read body and write to file - all in one scope
-        var transfer_buffer: [8192]u8 = undefined;
-
-        // Debug: Check state before calling response.reader()
-        if (builtin.mode == .Debug) {
-            std.debug.print("DEBUG: Before response.reader() - req.reader.state = ", .{});
-            switch (req.reader.state) {
-                .ready => std.debug.print(".ready\n", .{}),
-                .received_head => std.debug.print(".received_head\n", .{}),
-                .body_remaining_content_length => |len| std.debug.print(".body_remaining_content_length({})\n", .{len}),
-                else => std.debug.print("other\n", .{}),
-            }
-        }
-
+        // Get body reader - this invalidates response.head strings but we've
+        // already extracted what we need
+        var transfer_buffer: [8192]u8 align(8) = undefined;
         const body_reader = response.reader(&transfer_buffer);
-
-        // Debug: Check state after calling response.reader()
-        if (builtin.mode == .Debug) {
-            std.debug.print("DEBUG: After response.reader() - req.reader.state = ", .{});
-            switch (req.reader.state) {
-                .ready => std.debug.print(".ready\n", .{}),
-                .received_head => std.debug.print(".received_head\n", .{}),
-                .body_remaining_content_length => |len| std.debug.print(".body_remaining_content_length({})\n", .{len}),
-                else => std.debug.print("other\n", .{}),
+        
+        // Read entire body using unlimited - the HTTP reader already knows content length
+        const body_data = body_reader.allocRemaining(self.allocator, .unlimited) catch |err| {
+            switch (err) {
+                error.StreamTooLong => return HubError.ResponseTooLarge,
+                else => return HubError.NetworkError,
             }
-            std.debug.print("DEBUG: body_reader ptr = {*}\n", .{body_reader});
-            std.debug.print("DEBUG: &req.reader.interface = {*}\n", .{&req.reader.interface});
-        }
-
-        var bytes_downloaded: u64 = 0;
+        };
+        defer self.allocator.free(body_data);
+        
+        // Write to file
+        file.writeAll(body_data) catch {
+            return HubError.IoError;
+        };
+        
+        const bytes_downloaded: u64 = body_data.len;
         const initial_bytes: u64 = start_byte orelse 0;
-
-        var read_buf: [8192]u8 = undefined;
-        while (true) {
-            const bytes_read = body_reader.readSliceShort(&read_buf) catch {
-                return HubError.NetworkError;
-            };
-            if (bytes_read == 0) break;
-
-            file.writeAll(read_buf[0..bytes_read]) catch {
-                return HubError.IoError;
-            };
-            bytes_downloaded += bytes_read;
-
-            // Call progress callback
-            progress_fn(progress_ctx, initial_bytes + bytes_downloaded, total_size);
-        }
+        
+        // Call progress callback with final progress
+        progress_fn(progress_ctx, initial_bytes + bytes_downloaded, total_size);
 
         return StreamingResult{
             .status_code = status_code,

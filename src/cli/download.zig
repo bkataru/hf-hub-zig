@@ -281,8 +281,10 @@ pub fn run(
 
                 var size_buf: [32]u8 = undefined;
                 const size_str = types.formatBytes(file.size orelse 0, &size_buf);
-                const checkmark = if (use_color) terminal.Color.green.format("✓") else "OK";
-                const styled_name = if (use_color) terminal.Color.cyan.format(file.path) else file.path;
+                var checkmark_buf: [64]u8 = undefined;
+                const checkmark = if (use_color) terminal.color(&checkmark_buf, "✓", .green) else "OK";
+                var name_buf: [256]u8 = undefined;
+                const styled_name = if (use_color) terminal.color(&name_buf, file.path, .cyan) else file.path;
                 try stdout.print("  {s} {s} ({s})\n", .{ checkmark, styled_name, size_str });
             } else {
                 var size_buf: [32]u8 = undefined;

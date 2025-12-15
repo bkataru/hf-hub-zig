@@ -33,7 +33,7 @@ const ExitCode = enum(u8) {
 var interrupted: bool = false;
 
 /// Signal handler for graceful shutdown
-fn handleSignal(sig: i32) callconv(.C) void {
+fn handleSignal(sig: i32) callconv(.c) void {
     _ = sig;
     interrupted = true;
 
@@ -51,11 +51,11 @@ fn installSignalHandlers() void {
     if (builtin.os.tag != .windows) {
         const act = std.posix.Sigaction{
             .handler = .{ .handler = handleSignal },
-            .mask = std.posix.empty_sigset,
+            .mask = std.posix.sigemptyset(),
             .flags = 0,
         };
-        std.posix.sigaction(std.posix.SIG.INT, &act, null) catch {};
-        std.posix.sigaction(std.posix.SIG.TERM, &act, null) catch {};
+        std.posix.sigaction(std.posix.SIG.INT, &act, null);
+        std.posix.sigaction(std.posix.SIG.TERM, &act, null);
     }
 }
 

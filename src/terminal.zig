@@ -185,7 +185,7 @@ fn getTerminalSize() struct { width: u16, height: u16 } {
         var ws: std.posix.winsize = undefined;
         const result = std.posix.system.ioctl(std.posix.STDOUT_FILENO, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
         if (result == 0) {
-            return .{ .width = ws.ws_col, .height = ws.ws_row };
+            return .{ .width = ws.col, .height = ws.row };
         }
         // Fallback to environment variables
         if (std.posix.getenv("COLUMNS")) |cols| {
